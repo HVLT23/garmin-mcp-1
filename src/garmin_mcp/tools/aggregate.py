@@ -12,7 +12,12 @@ from typing import Any
 from garminconnect import Garmin
 from mcp.server.fastmcp import FastMCP
 
-from garmin_mcp.cache import TTL_ACTIVITY_FINAL, cached
+from garmin_mcp import cache
+from garmin_mcp.cache import (
+    TTL_ACTIVITY_FINAL,
+    TTL_TRAINING_STATUS,
+    TTL_WELLNESS,
+)
 from garmin_mcp.tools._helpers import safe_call
 
 logger = logging.getLogger(__name__)
@@ -53,24 +58,45 @@ def prior_night_date(activity_start: dt.datetime) -> dt.date:
     return activity_date
 
 
-def _capture(call: Callable[[], Any], label: str) -> Any:
-    """Run `call`; return a {"error": ...} stub instead of raising.
+def _capture(
+    ttl: int,
+    key: tuple[Any, ...],
+    label: str,
+    fn: Callable[[], Any],
+) -> Any:
+    """Fetch a single section of the aggregate.
 
-    The aggregate is designed to degrade gracefully — one missing signal
-    shouldn't block the whole context bundle. (Renamed from `_safe` to avoid
-    visual collision with `safe_call` in _helpers.)
+    Each section gets its own TTL bucket so a failure on one signal doesn't
+    poison the whole bundle: successes are cached at `ttl`, errors are
+    swallowed into a `{"error": "fetch_failed", ...}` stub but **never
+    cached** — so a transient blip clears as soon as the upstream recovers
+    instead of pinning a stale stub for the duration of the longest TTL.
     """
+    if cache._disabled():
+        try:
+            return fn()
+        except Exception as e:
+            logger.warning("aggregate sub-call %s failed: %s", label, e)
+            return {"error": "fetch_failed", "message": str(e), "section": label}
+
+    cache_obj, lock = cache._cache_for(ttl)
+    cache_key: tuple[Any, ...] = (label, *key)
+    with lock:
+        if cache_key in cache_obj:
+            return cache_obj[cache_key]
     try:
-        return call()
+        result = fn()
     except Exception as e:
         logger.warning("aggregate sub-call %s failed: %s", label, e)
         return {"error": "fetch_failed", "message": str(e), "section": label}
+    with lock:
+        cache_obj[cache_key] = result
+    return result
 
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
     @safe_call
-    @cached(ttl=TTL_ACTIVITY_FINAL)
     def get_session_with_context(activity_id: int) -> dict[str, Any]:
         """One-shot bundle: activity + the daily-life signals around it.
 
@@ -81,16 +107,29 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         client = client_factory()
         aid = str(activity_id)
 
+        # Primary fetch isn't routed through `_capture` — if Garmin refuses,
+        # `safe_call` translates the raised exception into a structured error
+        # at the tool boundary. (Caching happens via the standalone
+        # `get_activity` tool if the user calls that separately.)
         activity = client.get_activity(aid)
         if not isinstance(activity, dict):
             return {"error": "invalid_activity", "message": f"activity {aid} returned non-dict"}
+
+        splits = _capture(
+            TTL_ACTIVITY_FINAL, ("splits", aid), "splits",
+            lambda: client.get_activity_splits(aid),
+        )
+        hr_zones = _capture(
+            TTL_ACTIVITY_FINAL, ("hr_zones", aid), "hr_zones",
+            lambda: client.get_activity_hr_in_timezones(aid),
+        )
 
         start = _parse_activity_start(activity)
         if start is None:
             return {
                 "activity": activity,
-                "splits": _capture(lambda: client.get_activity_splits(aid), "splits"),
-                "hr_zones": _capture(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
+                "splits": splits,
+                "hr_zones": hr_zones,
                 "context": {
                     "error": "missing_start_time",
                     "message": "activity has no startTimeLocal — cannot align context windows",
@@ -102,23 +141,27 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
 
         return {
             "activity": activity,
-            "splits": _capture(lambda: client.get_activity_splits(aid), "splits"),
-            "hr_zones": _capture(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
+            "splits": splits,
+            "hr_zones": hr_zones,
             "prior_night_sleep": _capture(
-                lambda: client.get_sleep_data(sleep_date), "prior_night_sleep"
+                TTL_WELLNESS, ("sleep", sleep_date), "prior_night_sleep",
+                lambda: client.get_sleep_data(sleep_date),
             ),
             "prior_day_hrv": _capture(
-                lambda: client.get_hrv_data(sleep_date), "prior_day_hrv"
+                TTL_WELLNESS, ("hrv", sleep_date), "prior_day_hrv",
+                lambda: client.get_hrv_data(sleep_date),
             ),
             "morning_body_battery": _capture(
+                TTL_WELLNESS, ("body_battery", activity_date), "morning_body_battery",
                 lambda: client.get_body_battery(activity_date, activity_date),
-                "morning_body_battery",
             ),
             "morning_readiness": _capture(
-                lambda: client.get_training_readiness(activity_date), "morning_readiness"
+                TTL_TRAINING_STATUS, ("readiness", activity_date), "morning_readiness",
+                lambda: client.get_training_readiness(activity_date),
             ),
             "training_load_at_time": _capture(
-                lambda: client.get_training_status(activity_date), "training_load_at_time"
+                TTL_TRAINING_STATUS, ("training_status", activity_date), "training_load_at_time",
+                lambda: client.get_training_status(activity_date),
             ),
             "context_dates": {
                 "activity_start_local": start.isoformat(),

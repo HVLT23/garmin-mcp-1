@@ -93,9 +93,10 @@ def _parse_bearer_header(raw: str) -> str | None:
 def _bearer_middleware(app, expected_token: str):
     """Reject HTTP requests without `Authorization: Bearer <token>`.
 
-    Constant-time credential compare (`hmac.compare_digest`); the absent-header
-    branch also runs through compare_digest with a same-length dummy so that
-    timing doesn't leak whether the header was supplied.
+    Constant-time credential compare via `hmac.compare_digest`. Missing or
+    short candidates are right-padded with NUL bytes to the expected token's
+    length so the no-header / wrong-length / wrong-content paths all run the
+    same compare and don't leak timing information.
     """
     expected_bytes = expected_token.encode("utf-8")
 
@@ -108,9 +109,13 @@ def _bearer_middleware(app, expected_token: str):
             for k, v in scope.get("headers", [])
         }
         candidate = _parse_bearer_header(headers.get("authorization", ""))
-        # Compare even when the header is missing — uses an equal-length dummy
-        # so the no-header path takes the same time as a wrong-token path.
-        candidate_bytes = (candidate or "").encode("utf-8")
+        # Pad short / missing candidates with NUL bytes up to the expected
+        # length. Over-long candidates stay over-long (compare_digest still
+        # returns False; the timing of "wrong length" leaks only that the
+        # attacker supplied a wrong-length token, which they already knew).
+        # Bearer tokens come from env vars which can't contain NUL bytes,
+        # so NUL-padding can never collide with a real expected value.
+        candidate_bytes = (candidate or "").encode("utf-8").ljust(len(expected_bytes), b"\x00")
         if not hmac.compare_digest(candidate_bytes, expected_bytes):
             await send({
                 "type": "http.response.start",

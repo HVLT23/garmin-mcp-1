@@ -60,3 +60,19 @@ def test_bad_iso_date_returns_bad_argument(mcp_with_tools) -> None:
     result = fn(date="2026/05/09")
     assert isinstance(result, dict)
     assert result.get("error") == "bad_argument"
+
+
+def test_empty_string_date_returns_bad_argument(mcp_with_tools) -> None:
+    """Empty string must NOT silently fall back to today (likely a caller bug)."""
+    fn = get_tool(mcp_with_tools, "get_sleep")
+    result = fn(date="")
+    assert isinstance(result, dict)
+    assert result.get("error") == "bad_argument"
+
+
+def test_none_date_falls_back_to_today(mcp_with_tools, mock_garmin) -> None:
+    """None is the documented "no date supplied" path — must default to today."""
+    import datetime as dt
+    fn = get_tool(mcp_with_tools, "get_sleep")
+    fn(date=None)
+    assert mock_garmin.get_sleep_data.call_args.args[0] == dt.date.today().isoformat()

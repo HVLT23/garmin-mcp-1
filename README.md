@@ -165,6 +165,19 @@ docker run --rm -p 8000:8000 \
 (If you'd rather bootstrap on the host: run `garmin-mcp auth login` locally and bind-mount
 `~/.config/garmin-mcp/tokens` to `/data/tokens` instead of using a named volume.)
 
+## Limitations / known issues
+
+- **Single-user HTTP deployments only.** The Garmin client (`garminconnect` →
+  `garth.requests.Session`) is not documented as thread-safe. Concurrent tool calls
+  from multiple HTTP clients share a single session and could in theory race during
+  token refresh. The intent is single-user personal automation — if you expose this
+  to multiple concurrent clients, add a per-client lock around tool execution.
+- **Stdout discipline relies on the upstream library.** Stdio MCP requires a clean
+  stdout for JSON-RPC framing. The server pushes its own logging to stderr, but if
+  `garth` ever calls stdlib `print()` during a mid-session token refresh it could
+  corrupt the framing. Not observed in practice; eager auth verification at startup
+  mitigates the common case.
+
 ## Development
 
 ```bash

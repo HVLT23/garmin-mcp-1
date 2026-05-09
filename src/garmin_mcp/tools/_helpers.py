@@ -24,10 +24,16 @@ def today_iso() -> str:
 
 
 def coerce_date(value: str | None) -> str:
-    """Validate an ISO date string or return today."""
-    if not value:
+    """Validate an ISO date string or return today.
+
+    `None` defaults to today (the documented "no date supplied" path).
+    An empty string is treated as bad input — it's almost certainly a caller
+    bug rather than an intentional "I don't have a date", and surfacing
+    `bad_argument` makes that fixable.
+    """
+    if value is None:
         return today_iso()
-    # Validates format; raises ValueError on bad input which FastMCP surfaces.
+    # Raises ValueError on "" or bad format; safe_call returns bad_argument.
     dt.date.fromisoformat(value)
     return value
 

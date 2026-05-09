@@ -129,3 +129,46 @@ def test_get_session_with_context_bad_activity_payload(mcp_with_tools, mock_garm
         "error": "invalid_activity",
         "message": "activity 1 returned non-dict",
     }
+
+
+def test_aggregate_does_not_cache_partial_failure(
+    mcp_with_tools, mock_garmin, monkeypatch
+) -> None:
+    """A transient sub-call failure must NOT be cached as a stub.
+
+    Regression test for the round-2 review M1 finding: previously,
+    `@cached(ttl=TTL_ACTIVITY_FINAL)` on the outer aggregate stored the
+    `{"error": "fetch_failed", ...}` stub for 24h. After the per-section
+    refactor, sub-call errors are returned but never cached.
+    """
+    from garmin_mcp import cache
+    from tests.conftest import load_fixture
+
+    # Disable the autouse no-cache override so we actually exercise the
+    # cache path.
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    # First call: HRV raises → error stub in the bundle.
+    mock_garmin.get_hrv_data.side_effect = RuntimeError("transient")
+    fn = get_tool(mcp_with_tools, "get_session_with_context")
+    r1 = fn(activity_id=9999000001)
+    assert r1["prior_day_hrv"]["error"] == "fetch_failed"
+
+    # Recover. Same caller, same activity_id, same sleep_date — but the
+    # error must NOT have been cached, so this call should re-fetch HRV.
+    mock_garmin.get_hrv_data.side_effect = None
+    mock_garmin.get_hrv_data.return_value = load_fixture("hrv")
+
+    r2 = fn(activity_id=9999000001)
+    assert "error" not in r2["prior_day_hrv"]
+    assert r2["prior_day_hrv"]["hrvSummary"]["status"] == "BALANCED"
+
+    # Sanity: HRV was hit twice (transient error + recovery), but the
+    # successfully-fetched sections were cached after the first call so
+    # they shouldn't have been re-fetched.
+    assert mock_garmin.get_hrv_data.call_count == 2
+    assert mock_garmin.get_sleep_data.call_count == 1
+    assert mock_garmin.get_training_readiness.call_count == 1
+
+    cache.clear_all()
