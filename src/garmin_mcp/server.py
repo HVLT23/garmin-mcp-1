@@ -23,15 +23,24 @@ ClientFactory = Callable[[], Garmin]
 
 
 class _LockedGarmin:
-    """Thin proxy that serialises every call into a `Garmin` instance.
+    """Thin proxy that serialises every attribute access into a `Garmin` instance.
 
     `garminconnect` is built on `garth`, which uses a single `requests.Session`
     per client and is not documented as thread-safe. FastMCP's HTTP transport
     runs sync tools concurrently via `anyio.to_thread.run_sync`, so without
     serialisation two parallel tool calls could race during a token refresh
     or share an in-flight HTTP connection. We wrap the client and acquire a
-    per-instance lock around each method invocation. Tool code is unchanged:
-    it still does `client_factory().get_X(...)`.
+    per-instance lock around every attribute read — both method calls and
+    property reads (`client.profile`, `client.last_activity`, etc.) — so a
+    future tool that reaches for a property doesn't silently bypass the
+    lock. Tool code is unchanged: it still does `client_factory().get_X(...)`.
+
+    **Type-checker contract.** This class does NOT inherit from `Garmin` and
+    is not a `Garmin` subtype. The factory hands it back via `cast(Garmin, ...)`
+    so call sites stay annotated as `Garmin`, but the cast is a deliberate
+    lie — duck typing carries it. Do **not** add `isinstance(client, Garmin)`
+    checks anywhere downstream: the proxy will silently take the wrong branch.
+    Treat the factory return as opaque and call methods/attributes on it.
     """
 
     __slots__ = ("_client", "_lock")
@@ -41,7 +50,13 @@ class _LockedGarmin:
         self._lock = threading.Lock()
 
     def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._client, name)
+        # Lock the attribute *read* too: garth/garminconnect surface lazy
+        # properties (e.g. `client.profile`) that issue HTTP requests on
+        # first access, so unlocked reads could race the same way unlocked
+        # method calls would. For plain in-memory attributes this is a
+        # negligible extra lock acquisition.
+        with self._lock:
+            attr = getattr(self._client, name)
         if not callable(attr):
             return attr
         lock = self._lock
@@ -176,7 +191,7 @@ def _healthz_wrapper(app: Any) -> Any:
     async def asgi(scope: Any, receive: Any, send: Any) -> None:
         if (
             scope.get("type") == "http"
-            and scope.get("path") == "/healthz"
+            and scope.get("path") in ("/healthz", "/healthz/")
             and scope.get("method", "GET").upper() == "GET"
         ):
             await send({
@@ -223,6 +238,11 @@ def serve(settings: Settings | None = None) -> None:
         # Still start the server: tools will return structured auth errors.
         # This keeps stdio clients responsive instead of crashing on startup.
 
+    # `verify(eager_client)` above ran on the raw Garmin instance — fine, it's
+    # a one-shot before any concurrency exists. `build_server` then hands the
+    # client to `make_client_factory`, which wraps it in `_LockedGarmin` *before*
+    # `register_all` exposes any tool. There's no window in which a tool could
+    # observe the unwrapped client.
     mcp, settings = build_server(settings, eager_client=eager_client)
 
     if settings.mcp_transport == "stdio":

@@ -190,6 +190,11 @@ fly launch --no-deploy --name <app-name> --region waw --copy-config
 fly secrets set MCP_BEARER_TOKEN=$(openssl rand -hex 32)
 ```
 
+> **Note**: `fly launch --copy-config` rewrites `app =` in `fly.toml` to your
+> chosen app name. **Don't commit that change** — either revert it
+> (`git checkout fly.toml`) or use `fly launch --reuse-app` if you've already
+> created the app via the Fly dashboard.
+
 `fly.toml` declares the volume (`garmin_tokens`, mounted at `/data/tokens`)
 with `initial_size = "1gb"`, so the volume is created automatically on the
 first deploy. If you'd rather create it explicitly:

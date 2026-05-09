@@ -224,6 +224,39 @@ async def test_healthz_bypasses_bearer_middleware() -> None:
     assert sent[0]["status"] == 200
 
 
+async def test_healthz_trailing_slash_also_matches() -> None:
+    """Many monitoring tools auto-append a trailing slash. Both forms must
+    return 200 without auth so the probe doesn't flap into 401s."""
+    downstream = _DownstreamApp()
+    app = _healthz_wrapper(downstream)
+
+    sent = await _drive(app, _http_scope("/healthz/"))
+
+    assert downstream.calls == []
+    assert sent[0]["status"] == 200
+    assert sent[1]["body"] == b'{"status":"ok"}'
+
+
+async def test_healthz_wrapper_passes_through_lifespan_scope() -> None:
+    """Non-HTTP scopes (lifespan, websocket) must be forwarded verbatim
+    to the wrapped app, otherwise ASGI startup/shutdown breaks."""
+    downstream = _DownstreamApp()
+    app = _healthz_wrapper(downstream)
+
+    lifespan_scope = {"type": "lifespan"}
+
+    async def receive():
+        return {"type": "lifespan.startup"}
+
+    async def send(_msg):
+        pass
+
+    await app(lifespan_scope, receive, send)
+
+    assert len(downstream.calls) == 1
+    assert downstream.calls[0] is lifespan_scope
+
+
 async def test_non_healthz_still_requires_bearer_when_stacked() -> None:
     """Verify the wrapper composition doesn't accidentally bypass auth for
     non-healthz paths."""
