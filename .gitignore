@@ -1,0 +1,37 @@
+# Secrets / tokens — never commit
+.env
+.env.*
+!.env.example
+tokens/
+*.token
+oauth1_token.json
+oauth2_token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
