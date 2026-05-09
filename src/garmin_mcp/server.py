@@ -5,7 +5,9 @@ from __future__ import annotations
 import hmac
 import logging
 import sys
+import threading
 from collections.abc import Callable
+from typing import Any, cast
 
 from garminconnect import Garmin
 from mcp.server.fastmcp import FastMCP
@@ -18,6 +20,37 @@ logger = logging.getLogger(__name__)
 
 
 ClientFactory = Callable[[], Garmin]
+
+
+class _LockedGarmin:
+    """Thin proxy that serialises every call into a `Garmin` instance.
+
+    `garminconnect` is built on `garth`, which uses a single `requests.Session`
+    per client and is not documented as thread-safe. FastMCP's HTTP transport
+    runs sync tools concurrently via `anyio.to_thread.run_sync`, so without
+    serialisation two parallel tool calls could race during a token refresh
+    or share an in-flight HTTP connection. We wrap the client and acquire a
+    per-instance lock around each method invocation. Tool code is unchanged:
+    it still does `client_factory().get_X(...)`.
+    """
+
+    __slots__ = ("_client", "_lock")
+
+    def __init__(self, client: Garmin) -> None:
+        self._client = client
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._client, name)
+        if not callable(attr):
+            return attr
+        lock = self._lock
+
+        def locked(*args: Any, **kwargs: Any) -> Any:
+            with lock:
+                return attr(*args, **kwargs)
+
+        return locked
 
 
 def _stderr_logging() -> None:
@@ -36,11 +69,9 @@ def make_client_factory(settings: Settings, *, eager: Garmin | None = None) -> C
     just returns it. Otherwise it lazy-loads on first call with a lock so
     concurrent HTTP requests can't kick off two simultaneous SSO flows.
     """
-    import threading
-
     state: dict[str, Garmin] = {}
     if eager is not None:
-        state["client"] = eager
+        state["client"] = cast(Garmin, _LockedGarmin(eager))
     lock = threading.Lock()
 
     def _factory() -> Garmin:
@@ -50,7 +81,8 @@ def make_client_factory(settings: Settings, *, eager: Garmin | None = None) -> C
         with lock:
             client = state.get("client")
             if client is None:
-                client = load_client(settings.garmin_tokens_path)
+                raw = load_client(settings.garmin_tokens_path)
+                client = cast(Garmin, _LockedGarmin(raw))
                 state["client"] = client
             return client
 
@@ -133,6 +165,35 @@ def _bearer_middleware(app, expected_token: str):
     return asgi
 
 
+def _healthz_wrapper(app: Any) -> Any:
+    """Intercept GET /healthz and respond 200 without auth.
+
+    Mounted *outside* the bearer middleware so Fly.io's HTTP healthcheck
+    (and any other liveness probe) can hit it anonymously. Everything else
+    passes through to the wrapped app unchanged.
+    """
+
+    async def asgi(scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and scope.get("path") == "/healthz"
+            and scope.get("method", "GET").upper() == "GET"
+        ):
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b'{"status":"ok"}',
+            })
+            return
+        await app(scope, receive, send)
+
+    return asgi
+
+
 def serve(settings: Settings | None = None) -> None:
     """Entry point used by the CLI's `serve` subcommand."""
     _stderr_logging()
@@ -180,6 +241,9 @@ def serve(settings: Settings | None = None) -> None:
             "HTTP transport without MCP_BEARER_TOKEN (MCP_ALLOW_UNAUTHENTICATED=1) "
             "— server is unauthenticated"
         )
+    # /healthz is wrapped *outside* the bearer middleware so liveness probes
+    # (Fly.io HTTP checks etc.) can hit it without credentials.
+    app = _healthz_wrapper(app)
 
     config = uvicorn.Config(app, host=settings.mcp_host, port=settings.mcp_port, log_level="info")
     uvicorn.Server(config).run()
