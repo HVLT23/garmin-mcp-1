@@ -1,0 +1,5 @@
+[
+  {"startGMT": "2026-05-09T06:00:00.0", "endGMT": "2026-05-09T06:15:00.0", "steps": 1200, "primaryActivityLevel": "active"},
+  {"startGMT": "2026-05-09T06:15:00.0", "endGMT": "2026-05-09T06:30:00.0", "steps": 1500, "primaryActivityLevel": "active"},
+  {"startGMT": "2026-05-09T06:30:00.0", "endGMT": "2026-05-09T06:45:00.0", "steps": 320, "primaryActivityLevel": "sedentary"}
+]

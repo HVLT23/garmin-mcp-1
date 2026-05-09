@@ -1,0 +1,18 @@
+[
+  {
+    "calendarDate": "2026-05-09",
+    "score": 82,
+    "level": "HIGH",
+    "feedbackLong": "Your body is well rested and ready to train.",
+    "sleepScore": 78,
+    "sleepScoreFactorPercent": 30,
+    "recoveryTime": 4,
+    "recoveryTimeFactorPercent": 25,
+    "hrvWeeklyAverage": 52,
+    "hrvFactorPercent": 20,
+    "stressHistory": 25,
+    "stressHistoryFactorPercent": 15,
+    "acuteLoad": 230,
+    "acuteLoadFactorPercent": 10
+  }
+]

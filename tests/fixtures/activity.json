@@ -1,0 +1,16 @@
+{
+  "activityId": 9999000001,
+  "activityName": "Morning Run",
+  "activityType": {"typeKey": "running"},
+  "startTimeLocal": "2026-05-09 07:30:00",
+  "startTimeGMT": "2026-05-09 05:30:00",
+  "duration": 3600.0,
+  "distance": 10000.0,
+  "averageHR": 145,
+  "maxHR": 172,
+  "calories": 720,
+  "summaryDTO": {
+    "averagePower": 280,
+    "trainingEffect": 3.4
+  }
+}

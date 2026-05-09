@@ -1,0 +1,12 @@
+{
+  "dailySleepDTO": {
+    "calendarDate": "2026-05-09",
+    "sleepStartTimestampLocal": 1715221800000,
+    "sleepEndTimestampLocal": 1715252400000,
+    "deepSleepSeconds": 5400,
+    "lightSleepSeconds": 14400,
+    "remSleepSeconds": 5400,
+    "awakeSleepSeconds": 1200,
+    "sleepScores": {"overall": {"value": 78, "qualifierKey": "GOOD"}}
+  }
+}

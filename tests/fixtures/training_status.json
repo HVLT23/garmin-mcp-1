@@ -1,0 +1,28 @@
+{
+  "userId": 12345,
+  "mostRecentTrainingStatus": {
+    "latestTrainingStatusData": {
+      "trainingStatus": "PRODUCTIVE",
+      "trainingStatusFeedbackPhrase": "PRODUCTIVE_3"
+    }
+  },
+  "mostRecentTrainingLoadBalance": {
+    "metricsTrainingLoadBalanceDTOMap": {
+      "12345": {
+        "monthlyLoadAerobicLow": 320,
+        "monthlyLoadAerobicHigh": 180,
+        "monthlyLoadAnaerobic": 60,
+        "trainingBalanceFeedbackPhrase": "BALANCED"
+      }
+    }
+  },
+  "mostRecentVO2Max": {
+    "running": {"vo2MaxValue": 56.3, "fitnessAge": 28}
+  },
+  "loadTunnel": {
+    "weeklyTrainingLoad": 540,
+    "minTrainingLoad": 380,
+    "maxTrainingLoad": 720,
+    "feedbackPhrase": "OPTIMAL"
+  }
+}

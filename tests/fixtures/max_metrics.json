@@ -1,0 +1,8 @@
+[
+  {
+    "calendarDate": "2026-05-09",
+    "generic": {"vo2MaxValue": 55.0, "fitnessAge": 28},
+    "cycling": {"vo2MaxValue": 48.0, "fitnessAge": 30},
+    "heatAltitudeAcclimation": {"heatAcclimationPercentage": 12, "altitudeAcclimation": 5}
+  }
+]

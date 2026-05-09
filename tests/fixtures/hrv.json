@@ -1,0 +1,11 @@
+{
+  "userProfilePk": 12345,
+  "hrvSummary": {
+    "calendarDate": "2026-05-09",
+    "weeklyAvg": 52,
+    "lastNightAvg": 55,
+    "lastNight5MinHigh": 78,
+    "status": "BALANCED",
+    "feedbackPhrase": "BALANCED_GOOD_1"
+  }
+}
