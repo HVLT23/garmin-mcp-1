@@ -1,0 +1,106 @@
+{
+  "dailySleepDTO": {
+    "id": 1715252400000,
+    "userProfilePK": 12345,
+    "calendarDate": "2026-05-09",
+    "sleepStartTimestampLocal": 1715221800000,
+    "sleepEndTimestampLocal": 1715252400000,
+    "sleepTimeSeconds": 26400,
+    "deepSleepSeconds": 5400,
+    "lightSleepSeconds": 14400,
+    "remSleepSeconds": 5400,
+    "awakeSleepSeconds": 1200,
+    "averageRespirationValue": 14.5,
+    "lowestRespirationValue": 12.0,
+    "highestRespirationValue": 17.0,
+    "averageSpo2Value": 96,
+    "lowestSpo2Value": 90,
+    "averageStressDuringSleep": 18,
+    "sleepScores": {
+      "totalDuration": {"value": 88, "qualifierKey": "GOOD"},
+      "stress": {"value": 82, "qualifierKey": "GOOD"},
+      "awakeCount": {"value": 95, "qualifierKey": "EXCELLENT"},
+      "overall": {"value": 78, "qualifierKey": "GOOD"},
+      "remPercentage": {"value": 75, "qualifierKey": "GOOD", "optimalStart": 21.0, "optimalEnd": 31.0, "idealStartInSeconds": 5544, "idealEndInSeconds": 8184},
+      "lightPercentage": {"value": 80, "qualifierKey": "GOOD", "optimalStart": 30.0, "optimalEnd": 65.0, "idealStartInSeconds": 7920, "idealEndInSeconds": 17160},
+      "deepPercentage": {"value": 70, "qualifierKey": "FAIR", "optimalStart": 16.0, "optimalEnd": 33.0, "idealStartInSeconds": 4224, "idealEndInSeconds": 8712}
+    },
+    "sleepValidation": "DEVICE",
+    "ageGroup": "ADULT"
+  },
+  "sleepLevels": [
+    {"startGMT": "2026-05-09T03:50:00.0", "endGMT": "2026-05-09T04:20:00.0", "activityLevel": 1.0},
+    {"startGMT": "2026-05-09T04:20:00.0", "endGMT": "2026-05-09T05:50:00.0", "activityLevel": 2.0},
+    {"startGMT": "2026-05-09T05:50:00.0", "endGMT": "2026-05-09T06:35:00.0", "activityLevel": 3.0},
+    {"startGMT": "2026-05-09T06:35:00.0", "endGMT": "2026-05-09T07:20:00.0", "activityLevel": 1.0}
+  ],
+  "sleepRestlessMoments": [],
+  "restlessMomentsCount": 12,
+  "sleepMovement": [
+    {"startGMT": "2026-05-09T03:50:00.0", "endGMT": "2026-05-09T03:51:00.0", "activityLevel": 4.32},
+    {"startGMT": "2026-05-09T03:51:00.0", "endGMT": "2026-05-09T03:52:00.0", "activityLevel": 5.10},
+    {"startGMT": "2026-05-09T03:52:00.0", "endGMT": "2026-05-09T03:53:00.0", "activityLevel": 3.87},
+    {"startGMT": "2026-05-09T03:53:00.0", "endGMT": "2026-05-09T03:54:00.0", "activityLevel": 2.42},
+    {"startGMT": "2026-05-09T03:54:00.0", "endGMT": "2026-05-09T03:55:00.0", "activityLevel": 1.98},
+    {"startGMT": "2026-05-09T03:55:00.0", "endGMT": "2026-05-09T03:56:00.0", "activityLevel": 0.50},
+    {"startGMT": "2026-05-09T03:56:00.0", "endGMT": "2026-05-09T03:57:00.0", "activityLevel": 0.21},
+    {"startGMT": "2026-05-09T03:57:00.0", "endGMT": "2026-05-09T03:58:00.0", "activityLevel": 0.10},
+    {"startGMT": "2026-05-09T03:58:00.0", "endGMT": "2026-05-09T03:59:00.0", "activityLevel": 0.05},
+    {"startGMT": "2026-05-09T03:59:00.0", "endGMT": "2026-05-09T04:00:00.0", "activityLevel": 0.02}
+  ],
+  "wellnessEpochRespirationDataDTOList": [
+    {"startTimeGMT": 1715221800000, "respirationValue": 14.0},
+    {"startTimeGMT": 1715221860000, "respirationValue": 14.2},
+    {"startTimeGMT": 1715221920000, "respirationValue": 13.9},
+    {"startTimeGMT": 1715221980000, "respirationValue": 14.5},
+    {"startTimeGMT": 1715222040000, "respirationValue": 14.1},
+    {"startTimeGMT": 1715222100000, "respirationValue": 13.7},
+    {"startTimeGMT": 1715222160000, "respirationValue": 13.8},
+    {"startTimeGMT": 1715222220000, "respirationValue": 14.0}
+  ],
+  "sleepHeartRate": [
+    {"startGMT": 1715221800000, "value": 58},
+    {"startGMT": 1715221860000, "value": 56},
+    {"startGMT": 1715221920000, "value": 55},
+    {"startGMT": 1715221980000, "value": 54},
+    {"startGMT": 1715222040000, "value": 53},
+    {"startGMT": 1715222100000, "value": 52},
+    {"startGMT": 1715222160000, "value": 52},
+    {"startGMT": 1715222220000, "value": 51}
+  ],
+  "sleepStress": [
+    {"startGMT": 1715221800000, "value": 22},
+    {"startGMT": 1715221860000, "value": 19},
+    {"startGMT": 1715221920000, "value": 17},
+    {"startGMT": 1715221980000, "value": 14},
+    {"startGMT": 1715222040000, "value": 11},
+    {"startGMT": 1715222100000, "value": 9},
+    {"startGMT": 1715222160000, "value": 8},
+    {"startGMT": 1715222220000, "value": 7}
+  ],
+  "sleepBodyBattery": [
+    {"startGMT": 1715221800000, "value": 38},
+    {"startGMT": 1715221860000, "value": 39},
+    {"startGMT": 1715221920000, "value": 41},
+    {"startGMT": 1715221980000, "value": 43},
+    {"startGMT": 1715222040000, "value": 45},
+    {"startGMT": 1715222100000, "value": 47},
+    {"startGMT": 1715222160000, "value": 49},
+    {"startGMT": 1715222220000, "value": 51}
+  ],
+  "hrvData": {
+    "weeklyAvg": 52,
+    "lastNightAvg": 55,
+    "lastNight5MinHigh": 78,
+    "status": "BALANCED",
+    "feedbackPhrase": "BALANCED_GOOD_1",
+    "hrvReadings": [
+      {"hrvValue": 50, "readingTimeGMT": "2026-05-09T03:55:00.0"},
+      {"hrvValue": 52, "readingTimeGMT": "2026-05-09T04:00:00.0"},
+      {"hrvValue": 55, "readingTimeGMT": "2026-05-09T04:05:00.0"},
+      {"hrvValue": 58, "readingTimeGMT": "2026-05-09T04:10:00.0"},
+      {"hrvValue": 56, "readingTimeGMT": "2026-05-09T04:15:00.0"},
+      {"hrvValue": 54, "readingTimeGMT": "2026-05-09T04:20:00.0"}
+    ]
+  }
+}

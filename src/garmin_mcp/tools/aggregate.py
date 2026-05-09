@@ -95,16 +95,72 @@ def _capture(
     return result
 
 
+# Per-minute / per-5-min stream fields stripped from the default aggregate
+# response. Together they account for ~80% of payload size but no analytical
+# use case consumes them — callers that need raw streams must pass verbose=True.
+_SLEEP_DROP_FIELDS = frozenset(
+    {
+        "sleepMovement",
+        "wellnessEpochRespirationDataDTOList",
+        "sleepHeartRate",
+        "sleepStress",
+        "sleepBodyBattery",
+    }
+)
+
+
+def _trim_sleep(sleep: Any) -> Any:
+    """Strip per-minute streams from a sleep response.
+
+    Keeps `dailySleepDTO` (sleep score, total minutes, stage summary),
+    `sleepLevels` (stage durations), and any other top-level summary fields.
+    Drops the per-minute streams in `_SLEEP_DROP_FIELDS` and the nested
+    `hrvData.hrvReadings` array. Non-dict inputs (e.g. error stubs) pass
+    through unchanged.
+    """
+    if not isinstance(sleep, dict):
+        return sleep
+    trimmed = {k: v for k, v in sleep.items() if k not in _SLEEP_DROP_FIELDS}
+    hrv = trimmed.get("hrvData")
+    if isinstance(hrv, dict) and "hrvReadings" in hrv:
+        trimmed["hrvData"] = {k: v for k, v in hrv.items() if k != "hrvReadings"}
+    return trimmed
+
+
+def _trim_hrv(hrv: Any) -> Any:
+    """Strip the per-5-min `hrvReadings` array from an HRV response.
+
+    Keeps the summary block (lastNightAvg, weeklyAvg, status, feedbackPhrase…).
+    Non-dict inputs pass through unchanged.
+    """
+    if not isinstance(hrv, dict):
+        return hrv
+    return {k: v for k, v in hrv.items() if k != "hrvReadings"}
+
+
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
     @audited
     @safe_call
-    def get_session_with_context(activity_id: int) -> dict[str, Any]:
+    def get_session_with_context(
+        activity_id: int, verbose: bool = False
+    ) -> dict[str, Any]:
         """One-shot bundle: activity + the daily-life signals around it.
 
         Returns: activity, splits, hr_zones, prior_night_sleep,
         prior_day_hrv, morning_body_battery, morning_readiness,
         training_load_at_time.
+
+        By default (verbose=False) the prior-night sleep and prior-day HRV
+        sections are trimmed of their per-minute / per-5-min streams (sleep
+        movement, respiration, HR, stress, body battery, hrvReadings) — which
+        account for ~80% of the upstream payload but aren't useful for
+        LLM analysis. Pass verbose=True to get the un-modified upstream
+        responses for raw stream access.
+
+        Trimming happens *after* the cache layer, so cached entries always
+        store the full upstream response and a later verbose=True call hits
+        the cache rather than re-fetching.
         """
         client = client_factory()
         aid = str(activity_id)
@@ -141,18 +197,21 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         sleep_date = prior_night_date(start).isoformat()
         activity_date = start.date().isoformat()
 
+        sleep_raw = _capture(
+            TTL_WELLNESS, ("sleep", sleep_date), "prior_night_sleep",
+            lambda: client.get_sleep_data(sleep_date),
+        )
+        hrv_raw = _capture(
+            TTL_WELLNESS, ("hrv", sleep_date), "prior_day_hrv",
+            lambda: client.get_hrv_data(sleep_date),
+        )
+
         return {
             "activity": activity,
             "splits": splits,
             "hr_zones": hr_zones,
-            "prior_night_sleep": _capture(
-                TTL_WELLNESS, ("sleep", sleep_date), "prior_night_sleep",
-                lambda: client.get_sleep_data(sleep_date),
-            ),
-            "prior_day_hrv": _capture(
-                TTL_WELLNESS, ("hrv", sleep_date), "prior_day_hrv",
-                lambda: client.get_hrv_data(sleep_date),
-            ),
+            "prior_night_sleep": sleep_raw if verbose else _trim_sleep(sleep_raw),
+            "prior_day_hrv": hrv_raw if verbose else _trim_hrv(hrv_raw),
             "morning_body_battery": _capture(
                 TTL_WELLNESS, ("body_battery", activity_date), "morning_body_battery",
                 lambda: client.get_body_battery(activity_date, activity_date),
