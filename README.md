@@ -53,10 +53,12 @@ uv run garmin-mcp serve
 uv run garmin-mcp serve --transport http --host 0.0.0.0 --port 8000
 ```
 
-When `MCP_BEARER_TOKEN` is set, the HTTP transport rejects requests without a matching
-`Authorization: Bearer <token>` header. The single exception is `GET /healthz`, which
-returns `{"status":"ok"}` without auth so liveness probes (Fly.io, Docker `HEALTHCHECK`,
-etc.) can hit it anonymously.
+The HTTP transport requires every request to carry `Authorization: Bearer <token>`.
+In multi-tenant mode the bearer is looked up in the registry (see
+"Multi-tenant deployment" below); in legacy single-tenant mode (registry
+empty) it is compared against `MCP_BEARER_TOKEN`. The single exception is
+`GET /healthz`, which returns `{"status":"ok"}` without auth so liveness
+probes (Fly.io, Docker `HEALTHCHECK`, etc.) can hit it anonymously.
 
 ## Configuration
 
@@ -65,15 +67,16 @@ directory — see `.env.example`).
 
 | Variable                | Default                              | Purpose                                                                 |
 | ----------------------- | ------------------------------------ | ----------------------------------------------------------------------- |
-| `GARMIN_EMAIL`          | —                                    | Garmin account email (only needed during `auth login`).                 |
-| `GARMIN_PASSWORD`       | —                                    | Garmin account password (only needed during `auth login`).              |
-| `GARMIN_MFA`            | —                                    | If set, used non-interactively as the MFA code during `auth login`.     |
-| `GARMIN_TOKENS_PATH`    | `~/.config/garmin-mcp/tokens`        | Where OAuth tokens are persisted.                                       |
+| `GARMIN_EMAIL`          | —                                    | Garmin account email (only needed during `auth login` or `admin provision`). |
+| `GARMIN_PASSWORD`       | —                                    | Garmin account password (only needed during `auth login` or `admin provision`). |
+| `GARMIN_MFA`            | —                                    | If set, used non-interactively as the MFA code during login/provisioning. |
+| `GARMIN_TOKENS_PATH`    | `~/.config/garmin-mcp/tokens`        | **Root** under which each user's tokens live (`<root>/<user_id>/`). In single-tenant mode, the v1 layout (tokens directly under the root) still works as a one-time migration. |
+| `GARMIN_REGISTRY_PATH`  | `/data/registry.json`                | JSON file mapping `sha256(bearer) → user_id`. Empty/missing file = legacy single-bearer mode. |
 | `MCP_TRANSPORT`         | `stdio`                              | `stdio` or `http`.                                                      |
 | `MCP_HOST`              | `127.0.0.1`                          | HTTP bind host. The Docker image overrides this to `0.0.0.0`.           |
 | `MCP_PORT`              | `8000`                               | HTTP bind port.                                                         |
-| `MCP_BEARER_TOKEN`      | —                                    | When set with HTTP transport, requires this bearer token on requests.   |
-| `MCP_ALLOW_UNAUTHENTICATED` | `0`                              | Set to `1` to permit HTTP transport without a bearer token (refused otherwise). |
+| `MCP_BEARER_TOKEN`      | —                                    | Legacy single-bearer fallback. Used only when the registry is empty.    |
+| `MCP_ALLOW_UNAUTHENTICATED` | `0`                              | Set to `1` to permit HTTP transport without registry or bearer (refused otherwise). |
 | `GARMIN_MCP_NO_CACHE`   | —                                    | Set to `1` to disable in-process TTL caching.                           |
 
 `XDG_CONFIG_HOME` is honoured when `GARMIN_TOKENS_PATH` is unset.
@@ -240,15 +243,112 @@ curl -H "Authorization: Bearer $MCP_BEARER_TOKEN" https://<app-name>.fly.dev/mcp
 - *Bearer token*: `fly secrets set MCP_BEARER_TOKEN=<new>`; Fly restarts
   the machine. Update any clients that hold the old token.
 
+## Multi-tenant deployment
+
+The HTTP transport supports multiple Garmin accounts on a single deployment.
+Each tenant has their own bearer token (so workspace members can no longer
+read each other's data) and their own per-user tokens directory under
+`<GARMIN_TOKENS_PATH>/<user_id>/`. Provisioning is admin-mediated: the
+operator runs the SSO flow once per user and hands the user a fresh bearer.
+
+### Registry file format
+
+A JSON file at `GARMIN_REGISTRY_PATH` (default `/data/registry.json`) maps
+`sha256(bearer) → user_id`:
+
+```json
+{
+  "users": [
+    {"user_id": "alice", "bearer_sha256": "<64-char hex digest>"},
+    {"user_id": "bob",   "bearer_sha256": "<64-char hex digest>"}
+  ]
+}
+```
+
+The file is hot-reloaded on mtime change — adding or removing a user does
+not require a server restart. When the registry is empty or missing the
+server falls back to legacy single-bearer mode (see Migration below).
+
+### Provisioning
+
+```bash
+# On the server (or any host with the volume mounted):
+garmin-mcp admin provision --user-id alice
+#   prompts for email, password, and MFA (or reads GARMIN_EMAIL/GARMIN_PASSWORD/GARMIN_MFA)
+#   writes tokens to <root>/alice/
+#   atomically appends {alice, sha256(bearer)} to the registry
+#   prints the bearer to stdout exactly ONCE — copy it now, it can't be recovered
+```
+
+```bash
+garmin-mcp admin list                     # show user_ids + sha256 prefixes
+garmin-mcp admin revoke --user-id alice   # remove from registry
+garmin-mcp admin revoke --user-id alice --purge-tokens   # also rm -rf the tokens dir
+```
+
+The bearer is **never persisted in plaintext** — only its sha256 lives in
+the registry. Lose it and you must re-provision.
+
+### Audit log
+
+Every tool call emits one line to stderr:
+
+```
+2026-05-09 12:34:56 INFO garmin_mcp.audit: ts=2026-05-09T12:34:56 user=alice tool=list_recent_activities
+```
+
+Tool arguments are deliberately not logged.
+
+### Migration from v1 (single-tenant)
+
+Phases 1–3 of the migration ship the registry-aware middleware while
+keeping legacy single-bearer mode active. Owner traffic is unaffected
+until they explicitly switch over.
+
+1. **Deploy the new code with no registry file yet.** The server detects
+   the empty registry, falls back to comparing the request bearer against
+   `MCP_BEARER_TOKEN` (the v1 secret), and tags the request as the
+   `_legacy` user. Tokens at `/data/tokens/garmin_tokens.json` continue
+   to be served — no changes needed in this window.
+
+2. **Relocate the v1 tokens to the per-user layout** (one-time, via SSH):
+
+   ```bash
+   fly ssh console
+   mkdir -p /data/tokens/_legacy
+   mv /data/tokens/garmin_tokens.json /data/tokens/_legacy/
+   ```
+
+   The server keeps serving the owner from `_legacy/` while the registry
+   stays empty.
+
+3. **Provision the owner as a real tenant.** This step retires legacy mode:
+
+   ```bash
+   garmin-mcp admin provision --user-id owner
+   #   logs in fresh into /data/tokens/owner/
+   #   writes /data/registry.json with the owner's entry
+   #   prints the new bearer
+   ```
+
+   As soon as `/data/registry.json` is non-empty the legacy fallback
+   auto-disables: any client still using `MCP_BEARER_TOKEN` is rejected.
+   Update the owner's MCP-server config with the new bearer.
+
+4. **Add additional tenants.** For each new user:
+
+   ```bash
+   garmin-mcp admin provision --user-id <them>
+   ```
+
+   Hand them their bearer privately. Their data lives at
+   `/data/tokens/<them>/`; cache keys and tokens are isolated.
+
+After step 3 you can `unset` `MCP_BEARER_TOKEN` from the Fly secrets;
+it is no longer required.
+
 ## Limitations / known issues
 
-- **Designed for single-user personal use.** `garminconnect` reverse-engineers
-  Garmin's private endpoints — there are no rate-limiting guarantees, and
-  Garmin can break the data shapes at any time. The HTTP transport is safe
-  for parallel tool calls (the embedded Garmin client is wrapped behind a
-  per-instance lock so requests serialise into the underlying session), but
-  the server still represents a single Garmin account and isn't intended
-  for multi-tenant deployment.
 - **Stdout discipline relies on the upstream library.** Stdio MCP requires a clean
   stdout for JSON-RPC framing. The server pushes its own logging to stderr, but if
   `garth` ever calls stdlib `print()` during a mid-session token refresh it could
