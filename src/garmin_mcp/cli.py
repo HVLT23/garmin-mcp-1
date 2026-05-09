@@ -117,6 +117,31 @@ def _mint_bearer() -> str:
     return f"gmcp_{secrets.token_urlsafe(32)}"
 
 
+def _check_user_id_safe(user_id: str) -> None:
+    """Reject user_ids that could escape the per-user tokens directory.
+
+    Defence-in-depth: even though `_validate` in the registry module
+    rejects the same patterns at parse time, every consumer of an
+    operator-supplied `user_id` re-checks here so a missing call site
+    can't silently introduce a path-traversal bug. `revoke --purge-tokens`
+    in particular calls `shutil.rmtree(tokens_dir_for(user_id))`, where
+    `user_id = "../etc"` would resolve to `<root>/../etc` — destructive.
+    """
+    if (
+        not user_id
+        or "/" in user_id
+        or "\\" in user_id
+        or user_id.startswith(".")
+        or user_id in ("..", ".")
+    ):
+        click.echo(
+            f"invalid user-id {user_id!r}: must be non-empty, contain no "
+            "slashes, and not start with a dot",
+            err=True,
+        )
+        sys.exit(2)
+
+
 @admin.command("provision")
 @click.option("--user-id", required=True, help="Unique tenant identifier (e.g. 'alice').")
 @click.option("--email", envvar="GARMIN_EMAIL", default=None,
@@ -124,7 +149,7 @@ def _mint_bearer() -> str:
 @click.option("--password", envvar="GARMIN_PASSWORD", default=None,
               help="Garmin Connect password (or set GARMIN_PASSWORD).")
 @click.option("--registry-path", type=click.Path(path_type=Path), default=None,
-              help="Override the registry file location (default: GARMIN_REGISTRY_PATH or /data/registry.json).")
+              help="Override the registry file location (default: GARMIN_REGISTRY_PATH or /data/tokens/registry.json).")
 def admin_provision(
     user_id: str,
     email: str | None,
@@ -140,9 +165,7 @@ def admin_provision(
     the bearer to stdout exactly ONCE — the bearer is never persisted in
     plaintext.
     """
-    if not user_id or "/" in user_id or user_id.startswith("."):
-        click.echo(f"invalid user-id {user_id!r}", err=True)
-        sys.exit(2)
+    _check_user_id_safe(user_id)
     settings = load_settings()
     reg_path = _resolve_registry_path(registry_path, settings)
     registry = Registry(reg_path)
@@ -181,7 +204,20 @@ def admin_provision(
     try:
         write_registry_atomic(reg_path, entries)
     except OSError as e:
-        click.echo(f"failed to write registry {reg_path}: {e}", err=True)
+        # Tokens were already written above but the registry update failed.
+        # Surface the partial state so the operator knows what to clean up
+        # — they can either re-run `provision` (which re-uses the same
+        # tokens dir) or rm -rf it before retrying. We deliberately don't
+        # auto-cleanup: the operator might want to inspect the dir.
+        click.echo(
+            f"failed to write registry {reg_path}: {e}\n"
+            f"  PARTIAL PROVISION: tokens already written to {tokens_dir} "
+            f"but no registry entry was created.\n"
+            f"  Either re-run `garmin-mcp admin provision --user-id {user_id}` "
+            f"(safe — overwrites the tokens) or `rm -rf {tokens_dir}` to retry "
+            "from scratch.",
+            err=True,
+        )
         sys.exit(1)
 
     click.echo(
@@ -211,6 +247,7 @@ def admin_provision(
 @click.option("--registry-path", type=click.Path(path_type=Path), default=None)
 def admin_revoke(user_id: str, purge_tokens: bool, registry_path: Path | None) -> None:
     """Remove a tenant's registry entry (and optionally their tokens dir)."""
+    _check_user_id_safe(user_id)
     settings = load_settings()
     reg_path = _resolve_registry_path(registry_path, settings)
     registry = Registry(reg_path)
@@ -254,6 +291,11 @@ def admin_list(registry_path: Path | None) -> None:
         click.echo(f"(registry empty: {reg_path})", err=True)
         return
 
+    # All admin-CLI human-readable output goes to stderr (matching
+    # `provision`, where stdout is reserved for the one-time bearer).
+    # Keeping list output on stderr too means stdout is consistently the
+    # "secrets-only" channel — `admin list | column -t` would mislead a
+    # caller into thinking they got data when they got nothing.
     click.echo(f"{'user_id':<20} {'sha256[:8]':<10} {'tokens_dir_mtime':<20}", err=True)
     click.echo("-" * 52, err=True)
     for user_id, digest in entries:
@@ -264,7 +306,7 @@ def admin_list(registry_path: Path | None) -> None:
             ).strftime("%Y-%m-%dT%H:%M:%S")
         else:
             mtime = "(missing)"
-        click.echo(f"{user_id:<20} {digest[:8]:<10} {mtime:<20}")
+        click.echo(f"{user_id:<20} {digest[:8]:<10} {mtime:<20}", err=True)
 
 
 if __name__ == "__main__":

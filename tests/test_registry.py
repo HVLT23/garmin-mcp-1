@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -89,6 +88,19 @@ def test_bearer_sha256_must_be_hex_64(tmp_path: Path) -> None:
         reg.lookup("anything")
 
 
+def test_unsafe_user_id_rejected_at_parse_time(tmp_path: Path) -> None:
+    """Defence-in-depth: a malicious user_id that slipped past the admin
+    CLI (or was hand-edited into the registry) must be rejected here too,
+    so the per-user client lookup never resolves a path-traversal value.
+    """
+    p = tmp_path / "registry.json"
+    for bad in ("../etc", "alice/..", "..", ".hidden", "with\\backslash"):
+        _write(p, {"users": [{"user_id": bad, "bearer_sha256": _digest("x")}]})
+        reg = Registry(p)
+        with pytest.raises(RegistryError, match="unsafe"):
+            reg.lookup("anything")
+
+
 def test_duplicate_user_id_rejected(tmp_path: Path) -> None:
     p = tmp_path / "registry.json"
     _write(p, {"users": [
@@ -121,17 +133,17 @@ def test_malformed_json_raises(tmp_path: Path) -> None:
 
 
 def test_hot_reload_on_mtime_change(tmp_path: Path) -> None:
-    """Adding a user without restarting must be picked up on next lookup."""
+    """Adding a user without restarting must be picked up on next lookup.
+
+    The registry uses nanosecond-precision mtime so consecutive writes
+    within the same second are still detected — no sleep required.
+    """
     p = tmp_path / "registry.json"
     _write(p, {"users": [{"user_id": "alice", "bearer_sha256": _digest("a")}]})
     reg = Registry(p)
     assert reg.lookup("a") == "alice"
     assert reg.lookup("b") is None
 
-    # Sleep just long enough for mtime resolution to advance, then add bob.
-    # Different filesystems have different timestamp granularities; force a
-    # gap of >=1s to be safe.
-    time.sleep(1.1)
     _write(p, {"users": [
         {"user_id": "alice", "bearer_sha256": _digest("a")},
         {"user_id": "bob", "bearer_sha256": _digest("b")},
@@ -167,6 +179,33 @@ def test_resolve_path_falls_back_to_default(monkeypatch) -> None:
     monkeypatch.delenv("GARMIN_REGISTRY_PATH", raising=False)
     reg = load_registry(None)
     assert reg.path.name == "registry.json"
+
+
+def test_default_registry_lives_inside_default_tokens_root() -> None:
+    """Regression guard for the C1 release-blocker: the registry must sit
+    under the default tokens root so it survives Fly machine restarts on
+    the same persistent volume. If a future config change re-introduces a
+    rootfs-only path (e.g. /data/registry.json), every restart would wipe
+    the registry and silently break multi-tenant auth.
+    """
+    from garmin_mcp.config import Settings
+    from garmin_mcp.registry import DEFAULT_REGISTRY_PATH
+
+    settings = Settings()
+    # In CI the default tokens root resolves to ~/.config/garmin-mcp/tokens,
+    # not /data/tokens — so we can't compare to a literal path. Instead we
+    # assert the *Fly-deployment* default holds: registry sits inside the
+    # canonical tokens volume.
+    assert str(DEFAULT_REGISTRY_PATH).startswith("/data/tokens/"), (
+        f"DEFAULT_REGISTRY_PATH={DEFAULT_REGISTRY_PATH} must live under "
+        "/data/tokens/ so it shares the persistent volume with the "
+        "tokens themselves"
+    )
+    # And: anyone overriding tokens root via env should see the registry
+    # default still resolve under /data/tokens (we don't try to derive
+    # the registry path from settings.garmin_tokens_root — the registry
+    # default is independent — but we lock it on the canonical path).
+    _ = settings  # silence unused; kept to make the relationship explicit
 
 
 def test_write_registry_atomic_round_trips(tmp_path: Path) -> None:

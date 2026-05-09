@@ -13,6 +13,7 @@ RUN useradd --create-home --uid 1000 mcp \
 COPY --from=builder --chown=mcp:mcp /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
     GARMIN_TOKENS_PATH=/data/tokens \
+    GARMIN_REGISTRY_PATH=/data/tokens/registry.json \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8000

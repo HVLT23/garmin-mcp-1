@@ -47,8 +47,9 @@ class Settings(BaseSettings):
         default_factory=default_tokens_path,
         validation_alias=AliasChoices("garmin_tokens_root", "garmin_tokens_path"),
     )
-    # Path to the bearer-token registry file. Defaults to /data/registry.json
-    # (or whatever the registry module's default is).
+    # Path to the bearer-token registry file. Defaults are resolved by the
+    # registry module (currently /data/tokens/registry.json — kept inside
+    # the persistent tokens volume so it survives Fly machine restarts).
     garmin_registry_path: Path | None = None
 
     mcp_transport: Literal["stdio", "http"] = "stdio"

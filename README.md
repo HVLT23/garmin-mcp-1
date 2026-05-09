@@ -71,7 +71,7 @@ directory — see `.env.example`).
 | `GARMIN_PASSWORD`       | —                                    | Garmin account password (only needed during `auth login` or `admin provision`). |
 | `GARMIN_MFA`            | —                                    | If set, used non-interactively as the MFA code during login/provisioning. |
 | `GARMIN_TOKENS_PATH`    | `~/.config/garmin-mcp/tokens`        | **Root** under which each user's tokens live (`<root>/<user_id>/`). In single-tenant mode, the v1 layout (tokens directly under the root) still works as a one-time migration. |
-| `GARMIN_REGISTRY_PATH`  | `/data/registry.json`                | JSON file mapping `sha256(bearer) → user_id`. Empty/missing file = legacy single-bearer mode. |
+| `GARMIN_REGISTRY_PATH`  | `/data/tokens/registry.json`         | JSON file mapping `sha256(bearer) → user_id`. Lives inside the tokens volume so it survives restarts. Empty/missing file = legacy single-bearer mode. |
 | `MCP_TRANSPORT`         | `stdio`                              | `stdio` or `http`.                                                      |
 | `MCP_HOST`              | `127.0.0.1`                          | HTTP bind host. The Docker image overrides this to `0.0.0.0`.           |
 | `MCP_PORT`              | `8000`                               | HTTP bind port.                                                         |
@@ -253,7 +253,8 @@ operator runs the SSO flow once per user and hands the user a fresh bearer.
 
 ### Registry file format
 
-A JSON file at `GARMIN_REGISTRY_PATH` (default `/data/registry.json`) maps
+A JSON file at `GARMIN_REGISTRY_PATH` (default `/data/tokens/registry.json`,
+inside the persistent tokens volume) maps
 `sha256(bearer) → user_id`:
 
 ```json
@@ -327,11 +328,11 @@ until they explicitly switch over.
    ```bash
    garmin-mcp admin provision --user-id owner
    #   logs in fresh into /data/tokens/owner/
-   #   writes /data/registry.json with the owner's entry
+   #   writes /data/tokens/registry.json with the owner's entry
    #   prints the new bearer
    ```
 
-   As soon as `/data/registry.json` is non-empty the legacy fallback
+   As soon as `/data/tokens/registry.json` is non-empty the legacy fallback
    auto-disables: any client still using `MCP_BEARER_TOKEN` is rejected.
    Update the owner's MCP-server config with the new bearer.
 

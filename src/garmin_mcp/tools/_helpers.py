@@ -37,7 +37,7 @@ def audited(fn: Callable[..., Any]) -> Callable[..., Any]:
         user_id = CURRENT_USER.get() or LEGACY_USER_ID
         audit_logger.info(
             "ts=%s user=%s tool=%s",
-            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             user_id,
             tool_name,
         )

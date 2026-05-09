@@ -15,7 +15,13 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.auth import AuthError, load_client, verify
 from garmin_mcp.config import Settings, load_settings
-from garmin_mcp.registry import CURRENT_USER, LEGACY_USER_ID, Registry, load_registry
+from garmin_mcp.registry import (
+    CURRENT_USER,
+    LEGACY_USER_ID,
+    Registry,
+    RegistryError,
+    load_registry,
+)
 from garmin_mcp.tools import register_all
 
 logger = logging.getLogger(__name__)
@@ -224,6 +230,32 @@ async def _send_401(send: Any) -> None:
     })
 
 
+async def _send_503_registry_corrupt(send: Any, registry_path: Any) -> None:
+    """503 with an actionable JSON body when the registry file fails to parse.
+
+    Failing closed (rejecting all requests) is the right safety posture,
+    but the operator needs a clearer signal than uvicorn's default 500
+    page so the Fly.io healthcheck and any caller can tell the difference
+    between a regular auth failure and a misconfigured registry.
+    """
+    body = (
+        b'{"error":"registry_corrupt",'
+        b'"remediation":"check ' + str(registry_path).encode("utf-8") + b'"}'
+    )
+    await send({
+        "type": "http.response.start",
+        "status": 503,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"retry-after", b"30"),
+        ],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": body,
+    })
+
+
 def _legacy_bearer_match(candidate: str | None, expected_token: str) -> bool:
     """Constant-time bearer comparison for the legacy single-bearer fallback.
 
@@ -258,6 +290,12 @@ def _bearer_middleware(
     downstream ASGI middleware that prefers reading from there.
     """
     is_registry = isinstance(auth, Registry)
+    # Per-middleware-instance dedup of registry-corrupt log spam: only log
+    # the first time we see a given error message. (Mtime-based dedup
+    # naturally falls out of the registry's hot-reload — once the operator
+    # fixes the file, the new mtime triggers a successful reload and we
+    # forget the prior error.)
+    last_logged_corrupt: dict[str, str] = {}
 
     async def asgi(scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -272,16 +310,29 @@ def _bearer_middleware(
         user_id: str | None = None
         if is_registry:
             registry = cast(Registry, auth)
-            if registry.is_empty():
-                # Legacy fallback: registry is unpopulated, so the v1
-                # single-bearer comparison takes over and traffic is
-                # tagged as the `_legacy` user. Once a non-empty registry
-                # is dropped on disk, this branch auto-disables.
-                if legacy_token and _legacy_bearer_match(candidate, legacy_token):
-                    user_id = LEGACY_USER_ID
-            else:
-                if candidate:
+            try:
+                empty = registry.is_empty()
+                if empty:
+                    # Legacy fallback: registry is unpopulated, so the v1
+                    # single-bearer comparison takes over and traffic is
+                    # tagged as the `_legacy` user. Once a non-empty registry
+                    # is dropped on disk, this branch auto-disables.
+                    if legacy_token and _legacy_bearer_match(candidate, legacy_token):
+                        user_id = LEGACY_USER_ID
+                elif candidate:
                     user_id = registry.lookup(candidate)
+            except RegistryError as e:
+                # Fail closed: a malformed registry must NOT silently fall
+                # through to legacy mode (that would give every legacy-
+                # bearer holder access). Respond 503 with an actionable
+                # body, and log once per distinct error so we don't spam
+                # the audit trail with one line per inbound request.
+                msg = str(e)
+                if last_logged_corrupt.get(str(registry.path)) != msg:
+                    logger.error("registry corrupt at %s: %s", registry.path, msg)
+                    last_logged_corrupt[str(registry.path)] = msg
+                await _send_503_registry_corrupt(send, registry.path)
+                return
         else:
             # Pure single-bearer mode — used by tests and when the registry
             # path is configured but absent and no legacy token is set.
@@ -350,7 +401,22 @@ def serve(settings: Settings | None = None) -> None:
     settings = settings or load_settings()
 
     registry = load_registry(settings.garmin_registry_path)
-    legacy_active = registry.is_empty()
+    # Probe the registry once at startup. A `RegistryError` here is not
+    # fatal — we still start the server so an operator can SSH in and fix
+    # the file, and the bearer middleware will return 503 (registry_corrupt)
+    # for every request until the file parses cleanly. Symmetric to how
+    # an AuthError from `load_client` below is logged-and-continued.
+    registry_corrupt = False
+    legacy_active = False
+    try:
+        legacy_active = registry.is_empty()
+    except RegistryError as e:
+        logger.error(
+            "Registry at %s is malformed (%s). Starting in fail-closed "
+            "mode: every request will get a 503 until the file is fixed.",
+            registry.path, e,
+        )
+        registry_corrupt = True
 
     if (
         settings.mcp_transport == "http"
@@ -377,11 +443,14 @@ def serve(settings: Settings | None = None) -> None:
             eager_client = load_client(legacy_tokens)
             verify(eager_client)
             logger.info("Garmin auth OK (legacy user, tokens at %s)", legacy_tokens)
-        except AuthError as e:
-            logger.error("Garmin auth failed: %s — %s", e, e.remediation)
-            # Still start the server: tools will return structured auth errors.
-            # This keeps stdio clients responsive instead of crashing on startup.
-    else:
+        except Exception as e:
+            # Fail-soft: log loudly and continue serving — stdio clients
+            # stay responsive; HTTP tools surface structured auth errors.
+            # Widened from `AuthError` so a transient
+            # GarminConnectConnectionError at startup doesn't crash the
+            # whole process.
+            logger.exception("Eager load of _legacy tokens failed: %s", e)
+    elif not registry_corrupt:
         logger.info(
             "Multi-tenant mode: %d user(s) registered at %s",
             len(registry.user_ids()),

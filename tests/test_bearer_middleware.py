@@ -279,3 +279,74 @@ async def test_context_var_is_reset_after_request(tmp_path: Path) -> None:
     assert CURRENT_USER.get() is None
     await _run(mw, _scope({"authorization": "Bearer a"}))
     assert CURRENT_USER.get() is None  # reset after request
+
+
+# ---------- corrupt registry: 503, not uvicorn 500 ----------
+
+
+async def test_corrupt_registry_returns_503_with_actionable_body(tmp_path: Path) -> None:
+    """A malformed registry must NOT bubble up as a 500 — return 503 with
+    a JSON body the operator can act on."""
+    p = tmp_path / "registry.json"
+    p.write_text("{not json", encoding="utf-8")
+    registry = Registry(p)
+
+    app = _UserCapturingApp()
+    mw = _bearer_middleware(app, registry)
+    sent = await _run(mw, _scope({"authorization": "Bearer anything"}))
+
+    assert sent[0]["status"] == 503
+    assert app.calls == []
+    body = sent[1]["body"]
+    assert b"registry_corrupt" in body
+    assert str(p).encode() in body  # remediation path is included
+    # Retry-After header is set so callers back off.
+    headers = dict(sent[0]["headers"])
+    assert headers.get(b"retry-after") == b"30"
+
+
+async def test_corrupt_registry_logs_once_per_distinct_error(
+    tmp_path: Path, caplog
+) -> None:
+    """Spamming one log line per request would flood the audit trail.
+    Dedup so a single corrupt-registry state produces one log line."""
+    import logging as _logging
+
+    p = tmp_path / "registry.json"
+    p.write_text("{not json", encoding="utf-8")
+    registry = Registry(p)
+
+    app = _UserCapturingApp()
+    mw = _bearer_middleware(app, registry)
+
+    with caplog.at_level(_logging.ERROR, logger="garmin_mcp.server"):
+        for _ in range(5):
+            await _run(mw, _scope({"authorization": "Bearer anything"}))
+
+    corrupt_records = [
+        r for r in caplog.records
+        if r.name == "garmin_mcp.server" and "registry corrupt" in r.getMessage()
+    ]
+    assert len(corrupt_records) == 1, (
+        f"expected one log line for the same corrupt-registry state, got "
+        f"{len(corrupt_records)}"
+    )
+
+
+async def test_recovery_from_corrupt_registry(tmp_path: Path) -> None:
+    """Once the operator fixes the registry, requests must succeed again
+    on the next mtime change (no server restart required)."""
+    p = tmp_path / "registry.json"
+    p.write_text("{not json", encoding="utf-8")
+    registry = Registry(p)
+
+    app = _UserCapturingApp()
+    mw = _bearer_middleware(app, registry)
+    sent = await _run(mw, _scope({"authorization": "Bearer rescue"}))
+    assert sent[0]["status"] == 503
+
+    # Operator fixes the file.
+    _write_registry(p, [{"user_id": "alice", "bearer_sha256": _digest("rescue")}])
+    sent = await _run(mw, _scope({"authorization": "Bearer rescue"}))
+    assert sent[0]["status"] == 200
+    assert app.calls[0][0] == "alice"

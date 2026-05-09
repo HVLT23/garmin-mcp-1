@@ -5,14 +5,16 @@
 # to anything closer to you. The app name below is a placeholder —
 # `fly launch` will rewrite it (or override with `fly launch --name <yours>`).
 #
-# Authentication: per-user bearers live in `/data/registry.json`. Provision
-# tenants with `garmin-mcp admin provision --user-id <name>` over `fly ssh`.
-# `MCP_BEARER_TOKEN` is only honoured during the legacy migration window
-# (registry empty); once the registry is populated it can be removed.
+# Authentication: per-user bearers live in `/data/tokens/registry.json`
+# (inside the persistent volume so it survives restarts and redeploys).
+# Provision tenants with `garmin-mcp admin provision --user-id <name>`
+# over `fly ssh`. `MCP_BEARER_TOKEN` is only honoured during the legacy
+# migration window (registry empty); once the registry is populated it
+# can be removed.
 #
 # Tokens layout on the volume:
 #   /data/tokens/<user_id>/garmin_tokens.json  — per-user OAuth tokens
-#   /data/registry.json                         — sha256(bearer) → user_id
+#   /data/tokens/registry.json                  — sha256(bearer) → user_id
 #
 # See README "Multi-tenant deployment" for the full migration recipe.
 
@@ -27,7 +29,7 @@ primary_region = "fra"
   MCP_HOST = "0.0.0.0"
   MCP_PORT = "8000"
   GARMIN_TOKENS_PATH = "/data/tokens"
-  GARMIN_REGISTRY_PATH = "/data/registry.json"
+  GARMIN_REGISTRY_PATH = "/data/tokens/registry.json"
 
 [[mounts]]
   source = "garmin_tokens"

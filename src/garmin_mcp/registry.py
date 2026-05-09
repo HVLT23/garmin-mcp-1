@@ -1,10 +1,12 @@
 """Bearer-token registry for multi-tenant auth.
 
 Maps `sha256(bearer)` → `user_id`, loaded from a JSON file (default
-`/data/registry.json`). The file is hot-reloadable: the registry caches
-parsed entries keyed by mtime+size and reloads transparently when the
-file changes on disk, so adding a new user via `garmin-mcp admin
-provision` doesn't require a server restart.
+`/data/tokens/registry.json` — kept inside the per-user tokens root so
+it lives on the same persistent volume the tokens themselves are
+mounted from). The file is hot-reloadable: the registry caches parsed
+entries keyed by mtime+size and reloads transparently when the file
+changes on disk, so adding a new user via `garmin-mcp admin provision`
+doesn't require a server restart.
 
 Format:
     {
@@ -31,7 +33,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_REGISTRY_PATH = Path("/data/registry.json")
+DEFAULT_REGISTRY_PATH = Path("/data/tokens/registry.json")
 LEGACY_USER_ID = "_legacy"
 
 
@@ -61,15 +63,21 @@ class Registry:
         self._path = path
         self._lock = threading.Lock()
         self._mapping: dict[str, str] = {}
-        self._stat: tuple[float, int] | None = None
+        self._stat: tuple[int, int] | None = None
         self._loaded_once = False
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def _current_stat(self) -> tuple[float, int] | None:
-        """Return (mtime, size) of the registry file, or None if absent."""
+    def _current_stat(self) -> tuple[int, int] | None:
+        """Return (mtime_ns, size) of the registry file, or None if absent.
+
+        Uses nanosecond mtime so a write that lands within the same second
+        as a previous load is still detected — coarse second-resolution
+        mtime would let a quickly-following provision invocation slip past
+        the hot-reload check on filesystems that round to the second.
+        """
         try:
             st = self._path.stat()
         except FileNotFoundError:
@@ -77,9 +85,9 @@ class Registry:
         except OSError as e:
             logger.warning("registry stat() failed for %s: %s", self._path, e)
             return None
-        return (st.st_mtime, st.st_size)
+        return (st.st_mtime_ns, st.st_size)
 
-    def _reload_locked(self, stat: tuple[float, int] | None) -> None:
+    def _reload_locked(self, stat: tuple[int, int] | None) -> None:
         """Read the file and replace the cached mapping. Caller holds the lock."""
         if stat is None:
             self._mapping = {}
@@ -153,6 +161,18 @@ def _validate(doc: object, *, source: str) -> dict[str, str]:
             raise RegistryError(
                 f"registry {source}: users[{i}].user_id must be a non-empty string"
             )
+        if not _is_safe_user_id(user_id):
+            # Defence-in-depth: a hand-edited registry containing
+            # `user_id = "../etc"` would otherwise resolve to
+            # `<root>/../etc` in the per-user client cache. The admin CLI
+            # also rejects these patterns at provision/revoke time, but
+            # validating here means a malformed file alone can never
+            # produce a path-traversal lookup, even if someone bypasses
+            # the CLI to edit the registry by hand.
+            raise RegistryError(
+                f"registry {source}: users[{i}].user_id={user_id!r} is "
+                "unsafe (slashes, backslashes, leading dot, or '.'/'..')"
+            )
         if not isinstance(digest, str) or not _looks_like_sha256(digest):
             raise RegistryError(
                 f"registry {source}: users[{i}].bearer_sha256 must be a 64-char hex digest"
@@ -169,6 +189,21 @@ def _validate(doc: object, *, source: str) -> dict[str, str]:
         seen_user_ids.add(user_id)
         mapping[digest] = user_id
     return mapping
+
+
+def _is_safe_user_id(s: str) -> bool:
+    """True iff `s` is safe to interpolate into `<root>/<s>/`.
+
+    Mirrors the admin-CLI guard so a hand-edited or future-bypassed
+    registry can't introduce path traversal at lookup time.
+    """
+    return (
+        bool(s)
+        and "/" not in s
+        and "\\" not in s
+        and not s.startswith(".")
+        and s not in ("..", ".")
+    )
 
 
 def _looks_like_sha256(s: str) -> bool:

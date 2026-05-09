@@ -116,6 +116,26 @@ def test_admin_revoke_removes_entry(isolated_settings, monkeypatch) -> None:
     assert doc == {"users": [{"user_id": "bob", "bearer_sha256": _digest("b")}]}
 
 
+def test_admin_revoke_rejects_path_traversal_user_id(
+    isolated_settings, monkeypatch, tmp_path
+) -> None:
+    """A hand-edited registry containing a malicious user_id must not let
+    `revoke --purge-tokens` rm-rf its way out of the tokens root."""
+    sentinel = tmp_path / "sentinel-must-survive"
+    sentinel.write_text("alive")
+
+    runner = CliRunner()
+    for bad in ("../etc", "../", "..", "alice/..", ".hidden", "foo/bar"):
+        result = runner.invoke(
+            main,
+            ["admin", "revoke", "--user-id", bad, "--purge-tokens"],
+        )
+        assert result.exit_code != 0, f"expected rejection for {bad!r}"
+    # Sentinel still exists — no path-traversal rmtree happened.
+    assert sentinel.exists()
+    assert sentinel.read_text() == "alive"
+
+
 def test_admin_revoke_unknown_user_fails(isolated_settings) -> None:
     isolated_settings["registry_path"].write_text(json.dumps({"users": []}))
     runner = CliRunner()
@@ -156,18 +176,58 @@ def test_admin_list_prints_users_and_first_8_of_sha256(isolated_settings) -> Non
     result = runner.invoke(main, ["admin", "list"])
     assert result.exit_code == 0, result.output
 
-    # The first 8 chars of the digest must appear; the full digest must not
-    # (to make sure we don't accidentally print enough to enable lookup).
-    assert digest_a[:8] in result.output
-    assert digest_a not in result.output  # full hash NOT printed
-    assert "alice" in result.output
+    # All `admin list` output goes to stderr — stdout is reserved for
+    # secrets (the one-time bearer in `provision`). Verifying this also
+    # locks in the M3 reviewer fix.
+    assert result.stdout == ""
+    out = result.stderr
+    assert digest_a[:8] in out
+    assert digest_a not in out  # full hash NOT printed
+    assert "alice" in out
 
 
 def test_admin_list_empty(isolated_settings) -> None:
     runner = CliRunner()
     result = runner.invoke(main, ["admin", "list"])
     assert result.exit_code == 0
-    assert "empty" in result.output
+    assert result.stdout == ""
+    assert "empty" in result.stderr
+
+
+def test_provision_partial_failure_surfaces_remediation(
+    isolated_settings, monkeypatch
+) -> None:
+    """If `write_registry_atomic` fails after tokens are written, the operator
+    must see explicit remediation pointing at the orphaned tokens dir."""
+
+    def fake_login(email, password, tokens_path, mfa_prompt):
+        tokens_path.mkdir(parents=True, exist_ok=True)
+        (tokens_path / "garmin_tokens.json").write_text("{}")
+        client = MagicMock()
+        client.get_full_name.return_value = "Alice"
+        return client
+
+    def boom(path, entries):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("garmin_mcp.cli.login_interactive", fake_login)
+    monkeypatch.setattr("garmin_mcp.cli.verify", lambda c: c.get_full_name())
+    monkeypatch.setattr("garmin_mcp.cli.write_registry_atomic", boom)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["admin", "provision", "--user-id", "alice",
+         "--email", "a@b.c", "--password", "p"],
+    )
+    assert result.exit_code != 0
+    assert "PARTIAL PROVISION" in result.stderr
+    # Both remediation paths are mentioned by the message.
+    assert "re-run" in result.stderr
+    assert "rm -rf" in result.stderr
+    # Tokens dir was created but no registry written.
+    assert (isolated_settings["tokens_root"] / "alice").is_dir()
+    assert not isolated_settings["registry_path"].exists()
 
 
 def test_bearer_never_persisted_in_plaintext(isolated_settings, monkeypatch) -> None:
