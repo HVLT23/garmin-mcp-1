@@ -1,16 +1,22 @@
 # fly.toml — Fly.io deployment for garmin-mcp.
 #
-# This is a single-tenant personal deployment. Default region is Frankfurt
-# (`fra`) — a major EU hub with low latency from most of Europe. Change
-# `primary_region` to anything closer to you. The app name
-# below is a placeholder — `fly launch` will rewrite it (or override with
-# `fly launch --name <yours>`).
+# Multi-tenant deployment. Default region is Frankfurt (`fra`) — a major
+# EU hub with low latency from most of Europe. Change `primary_region`
+# to anything closer to you. The app name below is a placeholder —
+# `fly launch` will rewrite it (or override with `fly launch --name <yours>`).
 #
-# Secrets (NEVER bake into this file or the image):
-#   fly secrets set MCP_BEARER_TOKEN=$(openssl rand -hex 32)
+# Authentication: per-user bearers live in `/data/tokens/registry.json`
+# (inside the persistent volume so it survives restarts and redeploys).
+# Provision tenants with `garmin-mcp admin provision --user-id <name>`
+# over `fly ssh`. `MCP_BEARER_TOKEN` is only honoured during the legacy
+# migration window (registry empty); once the registry is populated it
+# can be removed.
 #
-# Tokens are bootstrapped locally with `garmin-mcp auth login` and copied
-# onto the volume via `fly ssh sftp shell` — see README "Deployment".
+# Tokens layout on the volume:
+#   /data/tokens/<user_id>/garmin_tokens.json  — per-user OAuth tokens
+#   /data/tokens/registry.json                  — sha256(bearer) → user_id
+#
+# See README "Multi-tenant deployment" for the full migration recipe.
 
 app = "garmin-mcp"
 primary_region = "fra"
@@ -23,6 +29,7 @@ primary_region = "fra"
   MCP_HOST = "0.0.0.0"
   MCP_PORT = "8000"
   GARMIN_TOKENS_PATH = "/data/tokens"
+  GARMIN_REGISTRY_PATH = "/data/tokens/registry.json"
 
 [[mounts]]
   source = "garmin_tokens"

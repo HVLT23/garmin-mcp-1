@@ -6,17 +6,20 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def default_tokens_path() -> Path:
-    """Resolve the default tokens directory.
+    """Resolve the default tokens root directory.
 
     Order:
       1. $GARMIN_TOKENS_PATH (handled by the Settings field, not here)
       2. $XDG_CONFIG_HOME/garmin-mcp/tokens
       3. ~/.config/garmin-mcp/tokens
+
+    In multi-tenant mode this is treated as the *root* under which each
+    user's tokens live in their own subdirectory (`<root>/<user_id>/`).
     """
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg) if xdg else Path.home() / ".config"
@@ -31,12 +34,23 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     garmin_email: str | None = None
     garmin_password: str | None = None
     garmin_mfa: str | None = None
-    garmin_tokens_path: Path = Field(default_factory=default_tokens_path)
+    # Root under which each user's tokens live (`<root>/<user_id>/`).
+    # The legacy `GARMIN_TOKENS_PATH` env var continues to populate this
+    # field — it's now interpreted as the root in multi-tenant mode.
+    garmin_tokens_root: Path = Field(
+        default_factory=default_tokens_path,
+        validation_alias=AliasChoices("garmin_tokens_root", "garmin_tokens_path"),
+    )
+    # Path to the bearer-token registry file. Defaults are resolved by the
+    # registry module (currently /data/tokens/registry.json — kept inside
+    # the persistent tokens volume so it survives Fly machine restarts).
+    garmin_registry_path: Path | None = None
 
     mcp_transport: Literal["stdio", "http"] = "stdio"
     # Bind to localhost by default — running HTTP transport on 0.0.0.0 with
@@ -50,6 +64,17 @@ class Settings(BaseSettings):
     mcp_allow_unauthenticated: bool = False
 
     garmin_mcp_no_cache: bool = False
+
+    # ----- helpers -----
+
+    def tokens_dir_for(self, user_id: str) -> Path:
+        """Resolve the per-user tokens directory under the root."""
+        return self.garmin_tokens_root / user_id
+
+    @property
+    def garmin_tokens_path(self) -> Path:
+        """Back-compat alias — equivalent to `garmin_tokens_root`."""
+        return self.garmin_tokens_root
 
 
 def load_settings() -> Settings:

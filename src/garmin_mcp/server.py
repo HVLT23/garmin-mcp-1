@@ -7,6 +7,7 @@ import logging
 import sys
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 from garminconnect import Garmin
@@ -14,6 +15,13 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.auth import AuthError, load_client, verify
 from garmin_mcp.config import Settings, load_settings
+from garmin_mcp.registry import (
+    CURRENT_USER,
+    LEGACY_USER_ID,
+    Registry,
+    RegistryError,
+    load_registry,
+)
 from garmin_mcp.tools import register_all
 
 logger = logging.getLogger(__name__)
@@ -77,29 +85,101 @@ def _stderr_logging() -> None:
     root.setLevel(logging.INFO)
 
 
-def make_client_factory(settings: Settings, *, eager: Garmin | None = None) -> ClientFactory:
-    """Build a factory that returns a single shared logged-in Garmin client.
+class _PerUserClientCache:
+    """Lazy-load and cache one `_LockedGarmin` per `user_id`.
 
-    If `eager` is provided (server startup already loaded one), the factory
-    just returns it. Otherwise it lazy-loads on first call with a lock so
-    concurrent HTTP requests can't kick off two simultaneous SSO flows.
+    The first request for a user acquires that user's lock and runs the
+    SSO/token-load flow exactly once; subsequent requests return the
+    cached proxy. Per-user locks (rather than one global lock) mean a
+    slow first-load for user A doesn't block requests for user B.
     """
-    state: dict[str, Garmin] = {}
-    if eager is not None:
-        state["client"] = cast(Garmin, _LockedGarmin(eager))
-    lock = threading.Lock()
 
-    def _factory() -> Garmin:
-        client = state.get("client")
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._clients: dict[str, Garmin] = {}
+        # One creation lock per user_id, plus a registry lock so we don't
+        # race when allocating those per-user locks.
+        self._user_locks: dict[str, threading.Lock] = {}
+        self._user_locks_lock = threading.Lock()
+
+    def _lock_for(self, user_id: str) -> threading.Lock:
+        with self._user_locks_lock:
+            lock = self._user_locks.get(user_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._user_locks[user_id] = lock
+            return lock
+
+    def install(self, user_id: str, eager: Garmin) -> None:
+        """Pre-warm the cache for a user (called for legacy mode at startup)."""
+        self._clients[user_id] = cast(Garmin, _LockedGarmin(eager))
+
+    def _resolve_tokens_dir(self, user_id: str) -> Path:
+        """Find the tokens directory for a user, with a v1-layout fallback.
+
+        Multi-tenant layout: `<root>/<user_id>/`. As a one-time migration
+        helper, the `_legacy` user falls back to the root itself when
+        `<root>/_legacy/` doesn't yet exist — that's the v1 single-tenant
+        layout where Garmin tokens lived directly under
+        `GARMIN_TOKENS_PATH`. Once an admin runs the documented
+        `mv /data/tokens/garmin_tokens.json /data/tokens/_legacy/`, the
+        primary path takes over.
+        """
+        primary = self._settings.tokens_dir_for(user_id)
+        if primary.exists():
+            return primary
+        if user_id == LEGACY_USER_ID:
+            root = self._settings.garmin_tokens_root
+            if root.exists():
+                return root
+        return primary
+
+    def get(self, user_id: str) -> Garmin:
+        client = self._clients.get(user_id)
         if client is not None:
             return client
+        lock = self._lock_for(user_id)
         with lock:
-            client = state.get("client")
+            client = self._clients.get(user_id)
             if client is None:
-                raw = load_client(settings.garmin_tokens_path)
+                tokens_dir = self._resolve_tokens_dir(user_id)
+                if not tokens_dir.exists():
+                    raise AuthError(
+                        f"no tokens for user_id={user_id!r} at {tokens_dir}",
+                        remediation=(
+                            "admin must run "
+                            f"`garmin-mcp admin provision --user-id {user_id}`"
+                        ),
+                    )
+                raw = load_client(tokens_dir)
                 client = cast(Garmin, _LockedGarmin(raw))
-                state["client"] = client
+                self._clients[user_id] = client
             return client
+
+
+def make_client_factory(
+    settings: Settings,
+    *,
+    eager: Garmin | None = None,
+    cache: _PerUserClientCache | None = None,
+) -> ClientFactory:
+    """Build a factory that returns the *current* user's Garmin client.
+
+    The factory reads the active user_id from the `CURRENT_USER` ContextVar
+    set by the bearer middleware on each authenticated request. In
+    legacy/single-bearer mode that user_id is `LEGACY_USER_ID`. Stdio
+    mode (no middleware) defaults to `LEGACY_USER_ID` too.
+
+    If `eager` is provided, the legacy user's client is pre-warmed so the
+    existing single-tenant traffic doesn't pay first-call latency.
+    """
+    cache = cache or _PerUserClientCache(settings)
+    if eager is not None:
+        cache.install(LEGACY_USER_ID, eager)
+
+    def _factory() -> Garmin:
+        user_id = CURRENT_USER.get() or LEGACY_USER_ID
+        return cache.get(user_id)
 
     return _factory
 
@@ -137,17 +217,87 @@ def _parse_bearer_header(raw: str) -> str | None:
     return credential
 
 
-def _bearer_middleware(app, expected_token: str):
-    """Reject HTTP requests without `Authorization: Bearer <token>`.
+async def _send_401(send: Any) -> None:
+    await send({
+        "type": "http.response.start",
+        "status": 401,
+        "headers": [(b"content-type", b"application/json"),
+                    (b"www-authenticate", b'Bearer realm="garmin-mcp"')],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": b'{"error":"unauthorized"}',
+    })
 
-    Constant-time credential compare via `hmac.compare_digest`. Missing or
-    short candidates are right-padded with NUL bytes to the expected token's
-    length so the no-header / wrong-length / wrong-content paths all run the
-    same compare and don't leak timing information.
+
+async def _send_503_registry_corrupt(send: Any, registry_path: Any) -> None:
+    """503 with an actionable JSON body when the registry file fails to parse.
+
+    Failing closed (rejecting all requests) is the right safety posture,
+    but the operator needs a clearer signal than uvicorn's default 500
+    page so the Fly.io healthcheck and any caller can tell the difference
+    between a regular auth failure and a misconfigured registry.
+    """
+    body = (
+        b'{"error":"registry_corrupt",'
+        b'"remediation":"check ' + str(registry_path).encode("utf-8") + b'"}'
+    )
+    await send({
+        "type": "http.response.start",
+        "status": 503,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"retry-after", b"30"),
+        ],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": body,
+    })
+
+
+def _legacy_bearer_match(candidate: str | None, expected_token: str) -> bool:
+    """Constant-time bearer comparison for the legacy single-bearer fallback.
+
+    Missing / short candidates are right-padded with NUL bytes to the
+    expected token's length so the no-header / wrong-length / wrong-content
+    paths all run the same compare and don't leak timing information.
+    Bearer tokens come from env vars which can't contain NUL bytes, so
+    NUL-padding can never collide with a real expected value.
     """
     expected_bytes = expected_token.encode("utf-8")
+    candidate_bytes = (candidate or "").encode("utf-8").ljust(len(expected_bytes), b"\x00")
+    return hmac.compare_digest(candidate_bytes, expected_bytes)
 
-    async def asgi(scope, receive, send):
+
+def _bearer_middleware(
+    app: Any,
+    auth: str | Registry,
+    *,
+    legacy_token: str | None = None,
+):
+    """Reject HTTP requests without a recognised `Authorization: Bearer <token>`.
+
+    `auth` is either:
+      - a `Registry` instance — bearer is sha256'd and looked up; on miss
+        we fall through to legacy_token (if registry is empty) or 401.
+      - a plain string — preserves the v1 single-bearer behaviour for
+        unit tests and for the case where no registry path is configured.
+
+    On success we set the `CURRENT_USER` ContextVar so the per-user
+    client factory can pick up the user_id without threading it through
+    every tool signature, and stash it in `scope["state"]` for any
+    downstream ASGI middleware that prefers reading from there.
+    """
+    is_registry = isinstance(auth, Registry)
+    # Per-middleware-instance dedup of registry-corrupt log spam: only log
+    # the first time we see a given error message. (Mtime-based dedup
+    # naturally falls out of the registry's hot-reload — once the operator
+    # fixes the file, the new mtime triggers a successful reload and we
+    # forget the prior error.)
+    last_logged_corrupt: dict[str, str] = {}
+
+    async def asgi(scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
@@ -156,26 +306,49 @@ def _bearer_middleware(app, expected_token: str):
             for k, v in scope.get("headers", [])
         }
         candidate = _parse_bearer_header(headers.get("authorization", ""))
-        # Pad short / missing candidates with NUL bytes up to the expected
-        # length. Over-long candidates stay over-long (compare_digest still
-        # returns False; the timing of "wrong length" leaks only that the
-        # attacker supplied a wrong-length token, which they already knew).
-        # Bearer tokens come from env vars which can't contain NUL bytes,
-        # so NUL-padding can never collide with a real expected value.
-        candidate_bytes = (candidate or "").encode("utf-8").ljust(len(expected_bytes), b"\x00")
-        if not hmac.compare_digest(candidate_bytes, expected_bytes):
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [(b"content-type", b"application/json"),
-                            (b"www-authenticate", b'Bearer realm="garmin-mcp"')],
-            })
-            await send({
-                "type": "http.response.body",
-                "body": b'{"error":"unauthorized"}',
-            })
+
+        user_id: str | None = None
+        if is_registry:
+            registry = cast(Registry, auth)
+            try:
+                empty = registry.is_empty()
+                if empty:
+                    # Legacy fallback: registry is unpopulated, so the v1
+                    # single-bearer comparison takes over and traffic is
+                    # tagged as the `_legacy` user. Once a non-empty registry
+                    # is dropped on disk, this branch auto-disables.
+                    if legacy_token and _legacy_bearer_match(candidate, legacy_token):
+                        user_id = LEGACY_USER_ID
+                elif candidate:
+                    user_id = registry.lookup(candidate)
+            except RegistryError as e:
+                # Fail closed: a malformed registry must NOT silently fall
+                # through to legacy mode (that would give every legacy-
+                # bearer holder access). Respond 503 with an actionable
+                # body, and log once per distinct error so we don't spam
+                # the audit trail with one line per inbound request.
+                msg = str(e)
+                if last_logged_corrupt.get(str(registry.path)) != msg:
+                    logger.error("registry corrupt at %s: %s", registry.path, msg)
+                    last_logged_corrupt[str(registry.path)] = msg
+                await _send_503_registry_corrupt(send, registry.path)
+                return
+        else:
+            # Pure single-bearer mode — used by tests and when the registry
+            # path is configured but absent and no legacy token is set.
+            if _legacy_bearer_match(candidate, cast(str, auth)):
+                user_id = LEGACY_USER_ID
+
+        if user_id is None:
+            await _send_401(send)
             return
-        await app(scope, receive, send)
+
+        scope.setdefault("state", {})["user_id"] = user_id
+        token = CURRENT_USER.set(user_id)
+        try:
+            await app(scope, receive, send)
+        finally:
+            CURRENT_USER.reset(token)
 
     return asgi
 
@@ -209,34 +382,80 @@ def _healthz_wrapper(app: Any) -> Any:
     return asgi
 
 
+def _eager_legacy_path(settings: Settings) -> Path:
+    """Where to look for the legacy single-tenant tokens during startup.
+
+    Prefer `<root>/_legacy/` (post-migration); fall back to `<root>/`
+    itself (pre-migration v1 layout) so the owner's traffic keeps working
+    in the deploy window before the SSH `mv` runs.
+    """
+    primary = settings.tokens_dir_for(LEGACY_USER_ID)
+    if primary.exists():
+        return primary
+    return settings.garmin_tokens_root
+
+
 def serve(settings: Settings | None = None) -> None:
     """Entry point used by the CLI's `serve` subcommand."""
     _stderr_logging()
     settings = settings or load_settings()
 
+    registry = load_registry(settings.garmin_registry_path)
+    # Probe the registry once at startup. A `RegistryError` here is not
+    # fatal — we still start the server so an operator can SSH in and fix
+    # the file, and the bearer middleware will return 503 (registry_corrupt)
+    # for every request until the file parses cleanly. Symmetric to how
+    # an AuthError from `load_client` below is logged-and-continued.
+    registry_corrupt = False
+    legacy_active = False
+    try:
+        legacy_active = registry.is_empty()
+    except RegistryError as e:
+        logger.error(
+            "Registry at %s is malformed (%s). Starting in fail-closed "
+            "mode: every request will get a 503 until the file is fixed.",
+            registry.path, e,
+        )
+        registry_corrupt = True
+
     if (
         settings.mcp_transport == "http"
+        and legacy_active
         and not settings.mcp_bearer_token
         and not settings.mcp_allow_unauthenticated
     ):
         logger.error(
-            "HTTP transport requires MCP_BEARER_TOKEN. "
-            "Set it, or set MCP_ALLOW_UNAUTHENTICATED=1 to override."
+            "HTTP transport requires either a populated registry at %s "
+            "or MCP_BEARER_TOKEN (legacy mode). "
+            "Set MCP_ALLOW_UNAUTHENTICATED=1 to override.",
+            registry.path,
         )
         raise SystemExit(2)
 
-    # Validate auth eagerly so the operator gets a clear error before any
-    # MCP traffic arrives. Reuse the loaded client for the lifetime of the
-    # server so the factory doesn't run a second SSO flow on first tool call.
+    # Eagerly load the legacy user's tokens (when legacy mode is active) so
+    # the existing single-tenant traffic doesn't pay first-call latency.
+    # Multi-tenant users are loaded lazily on first request by the
+    # per-user client cache.
     eager_client: Garmin | None = None
-    try:
-        eager_client = load_client(settings.garmin_tokens_path)
-        verify(eager_client)
-        logger.info("Garmin auth OK")
-    except AuthError as e:
-        logger.error("Garmin auth failed: %s — %s", e, e.remediation)
-        # Still start the server: tools will return structured auth errors.
-        # This keeps stdio clients responsive instead of crashing on startup.
+    if legacy_active:
+        legacy_tokens = _eager_legacy_path(settings)
+        try:
+            eager_client = load_client(legacy_tokens)
+            verify(eager_client)
+            logger.info("Garmin auth OK (legacy user, tokens at %s)", legacy_tokens)
+        except Exception as e:
+            # Fail-soft: log loudly and continue serving — stdio clients
+            # stay responsive; HTTP tools surface structured auth errors.
+            # Widened from `AuthError` so a transient
+            # GarminConnectConnectionError at startup doesn't crash the
+            # whole process.
+            logger.exception("Eager load of _legacy tokens failed: %s", e)
+    elif not registry_corrupt:
+        logger.info(
+            "Multi-tenant mode: %d user(s) registered at %s",
+            len(registry.user_ids()),
+            registry.path,
+        )
 
     # `verify(eager_client)` above ran on the raw Garmin instance — fine, it's
     # a one-shot before any concurrency exists. `build_server` then hands the
@@ -249,17 +468,26 @@ def serve(settings: Settings | None = None) -> None:
         mcp.run(transport="stdio")
         return
 
-    # HTTP transport — optionally wrap with bearer auth and run via uvicorn.
+    # HTTP transport — wrap with bearer auth and run via uvicorn.
     import uvicorn
 
     app = mcp.streamable_http_app()
-    if settings.mcp_bearer_token:
-        app = _bearer_middleware(app, settings.mcp_bearer_token)
-        logger.info("Bearer-token auth enabled for HTTP transport")
+    if not legacy_active or settings.mcp_bearer_token:
+        app = _bearer_middleware(
+            app, registry, legacy_token=settings.mcp_bearer_token
+        )
+        if legacy_active:
+            logger.info(
+                "Bearer-token auth enabled (legacy single-bearer mode active "
+                "until %s is populated)",
+                registry.path,
+            )
+        else:
+            logger.info("Bearer-token auth enabled (multi-tenant registry)")
     else:
         logger.warning(
-            "HTTP transport without MCP_BEARER_TOKEN (MCP_ALLOW_UNAUTHENTICATED=1) "
-            "— server is unauthenticated"
+            "HTTP transport without registry or MCP_BEARER_TOKEN "
+            "(MCP_ALLOW_UNAUTHENTICATED=1) — server is unauthenticated"
         )
     # /healthz is wrapped *outside* the bearer middleware so liveness probes
     # (Fly.io HTTP checks etc.) can hit it without credentials.

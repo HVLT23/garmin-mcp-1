@@ -9,13 +9,14 @@ from garminconnect import Garmin
 from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
-from garmin_mcp.tools._helpers import coerce_date, safe_call
+from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
 
 ClientFactory = Callable[[], Garmin]
 
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_sleep(date: str | None = None) -> dict[str, Any]:
@@ -25,6 +26,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_sleep_data(coerce_date(date))
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_hrv(date: str | None = None) -> dict[str, Any]:
@@ -33,6 +35,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return result or {}
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_body_battery(start_date: str, end_date: str | None = None) -> list[dict[str, Any]]:
@@ -47,6 +50,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_body_battery(s, e) or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_stress(date: str | None = None) -> dict[str, Any]:
@@ -54,6 +58,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_stress_data(coerce_date(date))
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_steps(date: str | None = None) -> list[dict[str, Any]]:
@@ -61,6 +66,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_steps_data(coerce_date(date)) or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_WELLNESS)
     def get_daily_summary(date: str | None = None) -> dict[str, Any]:
