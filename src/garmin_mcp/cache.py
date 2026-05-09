@@ -1,14 +1,20 @@
 """Process-local TTL caching for Garmin API responses.
 
 The decorator memoises tool functions on (tool_name, args, kwargs) for the
-configured TTL. A single shared TTLCache backs every tool — which is fine
-because cache size is bounded and keys are namespaced by tool name.
+configured TTL. One TTLCache per TTL bucket so each entry expires on its
+own bucket's clock.
+
+cachetools' TTLCache is **not thread-safe** — FastMCP's HTTP transport
+runs sync tools via anyio.to_thread.run_sync, so concurrent reads/writes
+need a lock. We use one RLock per cache plus a registry lock for cache
+creation.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -22,18 +28,22 @@ TTL_WELLNESS = 30 * 60
 TTL_TRAINING_STATUS = 60 * 60
 
 _MAX_ENTRIES = 1024
-_global_cache: TTLCache[tuple[Any, ...], Any] = TTLCache(maxsize=_MAX_ENTRIES, ttl=TTL_WELLNESS)
-# Per-key TTL is not natively supported by TTLCache; we use distinct caches
-# per TTL bucket so each entry expires on its own bucket's clock.
-_caches: dict[int, TTLCache[tuple[Any, ...], Any]] = {}
+_caches: dict[int, tuple[TTLCache[tuple[Any, ...], Any], threading.RLock]] = {}
+_registry_lock = threading.Lock()
 
 
-def _cache_for(ttl: int) -> TTLCache[tuple[Any, ...], Any]:
-    cache = _caches.get(ttl)
-    if cache is None:
-        cache = TTLCache(maxsize=_MAX_ENTRIES, ttl=ttl)
-        _caches[ttl] = cache
-    return cache
+def _cache_for(ttl: int) -> tuple[TTLCache[tuple[Any, ...], Any], threading.RLock]:
+    """Return (cache, lock) pair for a TTL, creating it on first use."""
+    entry = _caches.get(ttl)
+    if entry is not None:
+        return entry
+    with _registry_lock:
+        # Re-check inside the lock — another thread may have created it.
+        entry = _caches.get(ttl)
+        if entry is None:
+            entry = (TTLCache(maxsize=_MAX_ENTRIES, ttl=ttl), threading.RLock())
+            _caches[ttl] = entry
+        return entry
 
 
 def _disabled() -> bool:
@@ -55,7 +65,7 @@ def cached(ttl: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        cache = _cache_for(ttl)
+        cache, lock = _cache_for(ttl)
         name = fn.__qualname__
 
         @wraps(fn)
@@ -63,10 +73,14 @@ def cached(ttl: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
             if _disabled():
                 return fn(*args, **kwargs)
             key = _make_key(name, args, kwargs)
-            if key in cache:
-                return cache[key]
+            with lock:
+                if key in cache:
+                    return cache[key]
+            # Compute outside the lock — Garmin RTT can be hundreds of ms,
+            # we don't want to serialise unrelated tool calls behind it.
             value = fn(*args, **kwargs)
-            cache[key] = value
+            with lock:
+                cache[key] = value
             return value
 
         return wrapper
@@ -76,6 +90,6 @@ def cached(ttl: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
 
 def clear_all() -> None:
     """Drop every cache bucket. Useful in tests."""
-    for c in _caches.values():
-        c.clear()
-    _global_cache.clear()
+    for cache, lock in _caches.values():
+        with lock:
+            cache.clear()

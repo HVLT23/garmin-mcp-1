@@ -39,9 +39,15 @@ class Settings(BaseSettings):
     garmin_tokens_path: Path = Field(default_factory=default_tokens_path)
 
     mcp_transport: Literal["stdio", "http"] = "stdio"
-    mcp_host: str = "0.0.0.0"
+    # Bind to localhost by default — running HTTP transport on 0.0.0.0 with
+    # no bearer token would expose the user's Garmin data to the entire LAN.
+    # The Docker image overrides this to 0.0.0.0 inside the container.
+    mcp_host: str = "127.0.0.1"
     mcp_port: int = 8000
     mcp_bearer_token: str | None = None
+    # Refuse to start HTTP transport without a bearer token unless this is
+    # explicitly set to "1". Stdio is unaffected.
+    mcp_allow_unauthenticated: bool = False
 
     garmin_mcp_no_cache: bool = False
 
