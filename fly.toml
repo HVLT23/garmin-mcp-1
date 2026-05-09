@@ -1,0 +1,30 @@
+# fly.toml — placeholder. Deployment is a follow-up phase.
+#
+# When ready, fill out app/region/services and run:
+#   fly secrets set MCP_BEARER_TOKEN=...
+#   fly volumes create garmin_tokens --size 1
+#   fly deploy
+#
+# Reminder: tokens must be bootstrapped locally (`garmin-mcp auth login`)
+# and uploaded to the volume — never bake creds into the image.
+
+# app = "garmin-mcp"
+# primary_region = "fra"
+#
+# [build]
+#
+# [env]
+#   MCP_TRANSPORT = "http"
+#   MCP_HOST = "0.0.0.0"
+#   MCP_PORT = "8000"
+#   GARMIN_TOKENS_PATH = "/data/tokens"
+#
+# [[mounts]]
+#   source = "garmin_tokens"
+#   destination = "/data/tokens"
+#
+# [http_service]
+#   internal_port = 8000
+#   force_https = true
+#   auto_stop_machines = true
+#   auto_start_machines = true

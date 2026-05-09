@@ -1,0 +1,14 @@
+{
+  "calendarDate": "2026-05-09",
+  "totalSteps": 12500,
+  "totalKilocalories": 2850,
+  "activeKilocalories": 750,
+  "intensityMinutes": 65,
+  "restingHeartRate": 48,
+  "minHeartRate": 44,
+  "maxHeartRate": 172,
+  "stressDuration": 21600,
+  "averageStressLevel": 22,
+  "bodyBatteryChargedValue": 65,
+  "bodyBatteryDrainedValue": 28
+}

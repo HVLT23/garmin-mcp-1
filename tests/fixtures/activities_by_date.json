@@ -1,0 +1,5 @@
+[
+  {"activityId": 8888000001, "activityType": {"typeKey": "running"}, "startTimeLocal": "2026-05-01 07:00:00"},
+  {"activityId": 8888000002, "activityType": {"typeKey": "running"}, "startTimeLocal": "2026-05-03 07:00:00"},
+  {"activityId": 8888000003, "activityType": {"typeKey": "running"}, "startTimeLocal": "2026-05-05 07:00:00"}
+]

@@ -1,0 +1,7 @@
+{
+  "lapDTOs": [
+    {"lapIndex": 1, "distance": 1000, "duration": 350, "averageHR": 138},
+    {"lapIndex": 2, "distance": 1000, "duration": 345, "averageHR": 142},
+    {"lapIndex": 3, "distance": 1000, "duration": 340, "averageHR": 146}
+  ]
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "activityId": 9999000001,
+    "activityName": "Morning Run",
+    "activityType": {"typeKey": "running"},
+    "startTimeLocal": "2026-05-09 07:30:00",
+    "duration": 3600.0,
+    "distance": 10000.0,
+    "averageHR": 145
+  },
+  {
+    "activityId": 9999000002,
+    "activityName": "Evening Ride",
+    "activityType": {"typeKey": "cycling"},
+    "startTimeLocal": "2026-05-08 18:00:00",
+    "duration": 5400.0,
+    "distance": 35000.0,
+    "averageHR": 130
+  }
+]
