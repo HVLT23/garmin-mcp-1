@@ -1,7 +1,8 @@
 # fly.toml — Fly.io deployment for garmin-mcp.
 #
-# This is a single-tenant personal deployment. Region default is Warsaw
-# (`waw`); change `primary_region` to anything closer to you. The app name
+# This is a single-tenant personal deployment. Default region is Frankfurt
+# (`fra`) — a major EU hub with low latency from most of Europe. Change
+# `primary_region` to anything closer to you. The app name
 # below is a placeholder — `fly launch` will rewrite it (or override with
 # `fly launch --name <yours>`).
 #
@@ -12,7 +13,7 @@
 # onto the volume via `fly ssh sftp shell` — see README "Deployment".
 
 app = "garmin-mcp"
-primary_region = "waw"
+primary_region = "fra"
 
 [build]
   # Builds the Dockerfile at the repo root (default builder).
