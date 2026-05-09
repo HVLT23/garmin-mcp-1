@@ -55,8 +55,8 @@ def test_get_daily_summary(mcp_with_tools, mock_garmin) -> None:
     assert result["totalSteps"] == 12500
 
 
-def test_bad_iso_date_returns_error(mcp_with_tools) -> None:
+def test_bad_iso_date_returns_bad_argument(mcp_with_tools) -> None:
     fn = get_tool(mcp_with_tools, "get_sleep")
     result = fn(date="2026/05/09")
     assert isinstance(result, dict)
-    assert result.get("error") == "internal_error"
+    assert result.get("error") == "bad_argument"

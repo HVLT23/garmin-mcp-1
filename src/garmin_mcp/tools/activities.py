@@ -48,9 +48,9 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
     @safe_call
     @cached(ttl=TTL_ACTIVITY_FINAL)
-    def get_activity_hr_zones(activity_id: int) -> dict[str, Any]:
-        """Time-in-HR-zone breakdown for an activity."""
-        return client_factory().get_activity_hr_in_timezones(str(activity_id))
+    def get_activity_hr_zones(activity_id: int) -> list[dict[str, Any]]:
+        """Time-in-HR-zone breakdown for an activity (one entry per zone)."""
+        return client_factory().get_activity_hr_in_timezones(str(activity_id)) or []
 
     @mcp.tool()
     @safe_call

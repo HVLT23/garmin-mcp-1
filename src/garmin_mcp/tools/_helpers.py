@@ -57,6 +57,10 @@ def safe_call(fn: Callable[..., Any]) -> Callable[..., Any]:
                     "remediation": "back off and retry in a few minutes"}
         except GarminConnectConnectionError as e:
             return {"error": "garmin_unreachable", "message": str(e)}
+        except ValueError as e:
+            # Bad input from the caller (e.g. malformed ISO date) — distinguish
+            # from internal_error so the LLM knows it's a fixable input issue.
+            return {"error": "bad_argument", "message": str(e)}
         except Exception as e:
             logger.exception("Unhandled tool error in %s", fn.__qualname__)
             return {"error": "internal_error", "message": str(e)}

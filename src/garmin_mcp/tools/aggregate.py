@@ -53,11 +53,12 @@ def prior_night_date(activity_start: dt.datetime) -> dt.date:
     return activity_date
 
 
-def _safe(call: Callable[[], Any], label: str) -> Any:
+def _capture(call: Callable[[], Any], label: str) -> Any:
     """Run `call`; return a {"error": ...} stub instead of raising.
 
     The aggregate is designed to degrade gracefully — one missing signal
-    shouldn't block the whole context bundle.
+    shouldn't block the whole context bundle. (Renamed from `_safe` to avoid
+    visual collision with `safe_call` in _helpers.)
     """
     try:
         return call()
@@ -88,8 +89,8 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         if start is None:
             return {
                 "activity": activity,
-                "splits": _safe(lambda: client.get_activity_splits(aid), "splits"),
-                "hr_zones": _safe(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
+                "splits": _capture(lambda: client.get_activity_splits(aid), "splits"),
+                "hr_zones": _capture(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
                 "context": {
                     "error": "missing_start_time",
                     "message": "activity has no startTimeLocal — cannot align context windows",
@@ -101,22 +102,22 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
 
         return {
             "activity": activity,
-            "splits": _safe(lambda: client.get_activity_splits(aid), "splits"),
-            "hr_zones": _safe(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
-            "prior_night_sleep": _safe(
+            "splits": _capture(lambda: client.get_activity_splits(aid), "splits"),
+            "hr_zones": _capture(lambda: client.get_activity_hr_in_timezones(aid), "hr_zones"),
+            "prior_night_sleep": _capture(
                 lambda: client.get_sleep_data(sleep_date), "prior_night_sleep"
             ),
-            "prior_day_hrv": _safe(
+            "prior_day_hrv": _capture(
                 lambda: client.get_hrv_data(sleep_date), "prior_day_hrv"
             ),
-            "morning_body_battery": _safe(
+            "morning_body_battery": _capture(
                 lambda: client.get_body_battery(activity_date, activity_date),
                 "morning_body_battery",
             ),
-            "morning_readiness": _safe(
+            "morning_readiness": _capture(
                 lambda: client.get_training_readiness(activity_date), "morning_readiness"
             ),
-            "training_load_at_time": _safe(
+            "training_load_at_time": _capture(
                 lambda: client.get_training_status(activity_date), "training_load_at_time"
             ),
             "context_dates": {

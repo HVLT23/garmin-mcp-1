@@ -53,9 +53,9 @@ def test_search_activities_by_type_passes_dates(mcp_with_tools, mock_garmin) -> 
 def test_search_activities_by_type_rejects_bad_date(mcp_with_tools) -> None:
     fn = get_tool(mcp_with_tools, "search_activities_by_type")
     result = fn(type="running", start_date="not-a-date", end_date="2026-05-08")
-    # safe_call wraps the ValueError into a structured error
+    # safe_call distinguishes caller-input errors from server bugs.
     assert isinstance(result, dict)
-    assert result.get("error") == "internal_error"
+    assert result.get("error") == "bad_argument"
 
 
 def test_auth_error_returns_structured_payload(mock_garmin, mcp_with_tools) -> None:

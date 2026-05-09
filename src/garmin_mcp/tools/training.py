@@ -47,22 +47,23 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
-    def get_training_readiness(date: str | None = None) -> dict[str, Any]:
-        """Morning training readiness score and the inputs that drove it.
+    def get_training_readiness(date: str | None = None) -> list[dict[str, Any]]:
+        """Morning training readiness score(s) and the inputs that drove them.
 
-        Defaults to today.
+        Some watches log multiple readiness checks per day; the response is
+        a list. Defaults to today.
         """
-        return client_factory().get_training_readiness(coerce_date(date))
+        return client_factory().get_training_readiness(coerce_date(date)) or []
 
     @mcp.tool()
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
-    def get_vo2_max(date: str | None = None) -> dict[str, Any]:
-        """Latest VO2 max estimate(s) (running and cycling, if available).
+    def get_vo2_max(date: str | None = None) -> list[dict[str, Any]]:
+        """Latest VO2 max estimate(s) — generic/running and cycling, if available.
 
-        Defaults to today.
+        Garmin returns a list with one entry per discipline. Defaults to today.
         """
-        return client_factory().get_max_metrics(coerce_date(date))
+        return client_factory().get_max_metrics(coerce_date(date)) or []
 
     @mcp.tool()
     @safe_call
