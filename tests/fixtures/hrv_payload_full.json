@@ -1,0 +1,28 @@
+{
+  "userProfilePk": 12345,
+  "hrvSummary": {
+    "calendarDate": "2026-05-09",
+    "weeklyAvg": 52,
+    "lastNightAvg": 55,
+    "lastNight5MinHigh": 78,
+    "baseline": {
+      "lowUpper": 41,
+      "balancedLow": 47,
+      "balancedUpper": 65,
+      "markerValue": 0.65
+    },
+    "status": "BALANCED",
+    "feedbackPhrase": "BALANCED_GOOD_1",
+    "createTimeStamp": "2026-05-09T07:30:00.0"
+  },
+  "hrvReadings": [
+    {"hrvValue": 50, "readingTimeGMT": "2026-05-09T03:55:00.0", "readingTimeLocal": "2026-05-09T03:55:00.0"},
+    {"hrvValue": 52, "readingTimeGMT": "2026-05-09T04:00:00.0", "readingTimeLocal": "2026-05-09T04:00:00.0"},
+    {"hrvValue": 55, "readingTimeGMT": "2026-05-09T04:05:00.0", "readingTimeLocal": "2026-05-09T04:05:00.0"},
+    {"hrvValue": 58, "readingTimeGMT": "2026-05-09T04:10:00.0", "readingTimeLocal": "2026-05-09T04:10:00.0"},
+    {"hrvValue": 56, "readingTimeGMT": "2026-05-09T04:15:00.0", "readingTimeLocal": "2026-05-09T04:15:00.0"},
+    {"hrvValue": 54, "readingTimeGMT": "2026-05-09T04:20:00.0", "readingTimeLocal": "2026-05-09T04:20:00.0"},
+    {"hrvValue": 57, "readingTimeGMT": "2026-05-09T04:25:00.0", "readingTimeLocal": "2026-05-09T04:25:00.0"},
+    {"hrvValue": 59, "readingTimeGMT": "2026-05-09T04:30:00.0", "readingTimeLocal": "2026-05-09T04:30:00.0"}
+  ]
+}

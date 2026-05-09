@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
-from garmin_mcp.tools.aggregate import _parse_activity_start, prior_night_date
-from tests.conftest import get_tool
+from garmin_mcp.tools.aggregate import (
+    _parse_activity_start,
+    _trim_hrv,
+    _trim_sleep,
+    prior_night_date,
+)
+from tests.conftest import get_tool, load_fixture
 
 
 @pytest.mark.parametrize(
@@ -172,3 +178,105 @@ def test_aggregate_does_not_cache_partial_failure(
     assert mock_garmin.get_training_readiness.call_count == 1
 
     cache.clear_all()
+
+
+# ---------------------------------------------------------------------------
+# Payload trimming: _trim_sleep / _trim_hrv and the verbose flag
+# ---------------------------------------------------------------------------
+
+
+def test_trim_sleep_drops_per_minute_streams() -> None:
+    full = load_fixture("sleep_payload_full")
+    trimmed = _trim_sleep(full)
+
+    # Per-minute streams gone.
+    for dropped in (
+        "sleepMovement",
+        "wellnessEpochRespirationDataDTOList",
+        "sleepHeartRate",
+        "sleepStress",
+        "sleepBodyBattery",
+    ):
+        assert dropped not in trimmed, f"{dropped} should be dropped"
+
+    # Summary blocks preserved.
+    assert "dailySleepDTO" in trimmed
+    assert trimmed["dailySleepDTO"]["sleepScores"]["overall"]["value"] == 78
+    assert "sleepLevels" in trimmed
+    assert len(trimmed["sleepLevels"]) == 4
+
+    # Nested hrvReadings dropped, summary fields preserved.
+    assert "hrvData" in trimmed
+    assert "hrvReadings" not in trimmed["hrvData"]
+    assert trimmed["hrvData"]["lastNightAvg"] == 55
+    assert trimmed["hrvData"]["status"] == "BALANCED"
+
+
+def test_trim_sleep_passes_through_non_dict() -> None:
+    assert _trim_sleep(None) is None
+    assert _trim_sleep({"error": "fetch_failed"}) == {"error": "fetch_failed"}
+
+
+def test_trim_hrv_drops_readings_array() -> None:
+    full = load_fixture("hrv_payload_full")
+    trimmed = _trim_hrv(full)
+
+    assert "hrvReadings" not in trimmed
+    assert trimmed["hrvSummary"]["lastNightAvg"] == 55
+    assert trimmed["hrvSummary"]["weeklyAvg"] == 52
+    assert trimmed["hrvSummary"]["status"] == "BALANCED"
+
+
+def test_trim_hrv_passes_through_non_dict() -> None:
+    assert _trim_hrv("oops") == "oops"
+
+
+def test_aggregate_default_payload_is_trimmed_and_under_15kb(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """Default call should drop per-minute streams and the result should be <15k chars."""
+    mock_garmin.get_sleep_data.return_value = load_fixture("sleep_payload_full")
+    mock_garmin.get_hrv_data.return_value = load_fixture("hrv_payload_full")
+
+    fn = get_tool(mcp_with_tools, "get_session_with_context")
+    result = fn(activity_id=9999000001)
+
+    serialized = json.dumps(result)
+    assert len(serialized) < 15_000, f"trimmed payload was {len(serialized)} chars"
+
+    sleep = result["prior_night_sleep"]
+    for dropped in (
+        "sleepMovement",
+        "wellnessEpochRespirationDataDTOList",
+        "sleepHeartRate",
+        "sleepStress",
+        "sleepBodyBattery",
+    ):
+        assert dropped not in sleep
+    assert "hrvReadings" not in sleep["hrvData"]
+    # Kept fields.
+    assert sleep["dailySleepDTO"]["sleepScores"]["overall"]["value"] == 78
+    assert sleep["sleepLevels"]
+    assert sleep["hrvData"]["lastNightAvg"] == 55
+
+    hrv = result["prior_day_hrv"]
+    assert "hrvReadings" not in hrv
+    assert hrv["hrvSummary"]["lastNightAvg"] == 55
+
+
+def test_aggregate_verbose_returns_unmodified_upstream(mcp_with_tools, mock_garmin) -> None:
+    """verbose=True should preserve the full upstream payloads byte-for-byte."""
+    sleep_full = load_fixture("sleep_payload_full")
+    hrv_full = load_fixture("hrv_payload_full")
+    mock_garmin.get_sleep_data.return_value = sleep_full
+    mock_garmin.get_hrv_data.return_value = hrv_full
+
+    fn = get_tool(mcp_with_tools, "get_session_with_context")
+    result = fn(activity_id=9999000001, verbose=True)
+
+    assert result["prior_night_sleep"] == sleep_full
+    assert result["prior_day_hrv"] == hrv_full
+    # Sanity: verbose is meaningfully fatter than trimmed.
+    trimmed_size = len(json.dumps(fn(activity_id=9999000001)))
+    verbose_size = len(json.dumps(result))
+    assert verbose_size > trimmed_size
