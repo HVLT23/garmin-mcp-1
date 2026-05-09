@@ -9,13 +9,14 @@ from garminconnect import Garmin
 from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_ACTIVITY_FINAL, TTL_ACTIVITY_LIST, cached
-from garmin_mcp.tools._helpers import coerce_date, safe_call
+from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
 
 ClientFactory = Callable[[], Garmin]
 
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_ACTIVITY_LIST)
     def list_recent_activities(limit: int = 20, start: int = 0) -> list[dict[str, Any]]:
@@ -32,6 +33,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return result or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_ACTIVITY_FINAL)
     def get_activity(activity_id: int) -> dict[str, Any]:
@@ -39,6 +41,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_activity(str(activity_id))
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_ACTIVITY_FINAL)
     def get_activity_splits(activity_id: int) -> dict[str, Any]:
@@ -46,6 +49,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_activity_splits(str(activity_id))
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_ACTIVITY_FINAL)
     def get_activity_hr_zones(activity_id: int) -> list[dict[str, Any]]:
@@ -53,6 +57,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_activity_hr_in_timezones(str(activity_id)) or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_ACTIVITY_LIST)
     def search_activities_by_type(

@@ -9,7 +9,7 @@ from garminconnect import Garmin
 from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_TRAINING_STATUS, cached
-from garmin_mcp.tools._helpers import coerce_date, safe_call
+from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
 
 ClientFactory = Callable[[], Garmin]
 
@@ -35,6 +35,7 @@ def _extract_training_load(status: dict[str, Any]) -> dict[str, Any]:
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
     def get_training_status(date: str | None = None) -> dict[str, Any]:
@@ -45,6 +46,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_training_status(coerce_date(date))
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
     def get_training_readiness(date: str | None = None) -> list[dict[str, Any]]:
@@ -56,6 +58,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_training_readiness(coerce_date(date)) or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
     def get_vo2_max(date: str | None = None) -> list[dict[str, Any]]:
@@ -66,6 +69,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return client_factory().get_max_metrics(coerce_date(date)) or []
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
     def get_training_load(date: str | None = None) -> dict[str, Any]:
@@ -77,6 +81,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         return _extract_training_load(status) if isinstance(status, dict) else {}
 
     @mcp.tool()
+    @audited
     @safe_call
     @cached(ttl=TTL_TRAINING_STATUS)
     def get_race_predictor() -> dict[str, Any]:

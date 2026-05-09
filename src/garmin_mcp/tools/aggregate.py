@@ -17,8 +17,9 @@ from garmin_mcp.cache import (
     TTL_ACTIVITY_FINAL,
     TTL_TRAINING_STATUS,
     TTL_WELLNESS,
+    _current_user_id,
 )
-from garmin_mcp.tools._helpers import safe_call
+from garmin_mcp.tools._helpers import audited, safe_call
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ def _capture(
             return {"error": "fetch_failed", "message": str(e), "section": label}
 
     cache_obj, lock = cache._cache_for(ttl)
-    cache_key: tuple[Any, ...] = (label, *key)
+    cache_key: tuple[Any, ...] = (_current_user_id(), label, *key)
     with lock:
         if cache_key in cache_obj:
             return cache_obj[cache_key]
@@ -96,6 +97,7 @@ def _capture(
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
+    @audited
     @safe_call
     def get_session_with_context(activity_id: int) -> dict[str, Any]:
         """One-shot bundle: activity + the daily-life signals around it.

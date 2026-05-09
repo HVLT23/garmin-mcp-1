@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -15,8 +16,34 @@ from garminconnect import (
 )
 
 from garmin_mcp.auth import AuthError
+from garmin_mcp.registry import CURRENT_USER, LEGACY_USER_ID
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("garmin_mcp.audit")
+
+
+def audited(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Emit one stderr line per tool call: `ts=... user=... tool=...`.
+
+    Args are deliberately NOT logged — they can carry activity IDs that
+    are not interesting and could grow the log. Stdio mode keeps stdout
+    clean because the audit logger inherits the root handler configured
+    on stderr by `_stderr_logging`.
+    """
+    tool_name = fn.__name__
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        user_id = CURRENT_USER.get() or LEGACY_USER_ID
+        audit_logger.info(
+            "ts=%s user=%s tool=%s",
+            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            user_id,
+            tool_name,
+        )
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def today_iso() -> str:
