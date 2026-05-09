@@ -22,8 +22,11 @@ EXPOSE 8000
 # Container-level healthcheck against the unauthenticated /healthz route.
 # Fly.io has its own HTTP healthcheck wired up in fly.toml; this is for
 # `docker run` / Compose users. Python avoids pulling curl into the image.
+# Reads MCP_PORT at probe time so a Compose user overriding the listener
+# port doesn't end up with a healthcheck pinned to 8000.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)" \
+  CMD python -c "import os,urllib.request,sys; \
+port=os.environ.get('MCP_PORT','8000'); \
+sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=3).status == 200 else 1)" \
   || exit 1
 ENTRYPOINT ["garmin-mcp", "serve"]
