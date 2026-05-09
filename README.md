@@ -13,7 +13,7 @@ AI assistant can analyse training sessions in the context of daily-life signals.
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.14+
 - [uv](https://docs.astral.sh/uv/) (`pipx install uv` or follow the official installer)
 - A Garmin Connect account (2FA / MFA supported)
 

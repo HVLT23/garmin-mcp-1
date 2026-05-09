@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "MCP server exposing read-only Garmin Connect data for AI training analysis"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 authors = [{ name = "Kamil Gabryjelski" }]
 dependencies = [
-    "garminconnect==0.3.2",
+    "garminconnect==0.3.3",
     "mcp[cli]>=1.2.0",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
@@ -37,14 +37,14 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 strict = false
 warn_unused_ignores = true
 warn_redundant_casts = true
