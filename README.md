@@ -68,9 +68,10 @@ directory — see `.env.example`).
 | `GARMIN_MFA`            | —                                    | If set, used non-interactively as the MFA code during `auth login`.     |
 | `GARMIN_TOKENS_PATH`    | `~/.config/garmin-mcp/tokens`        | Where OAuth tokens are persisted.                                       |
 | `MCP_TRANSPORT`         | `stdio`                              | `stdio` or `http`.                                                      |
-| `MCP_HOST`              | `0.0.0.0`                            | HTTP bind host.                                                         |
+| `MCP_HOST`              | `127.0.0.1`                          | HTTP bind host. The Docker image overrides this to `0.0.0.0`.           |
 | `MCP_PORT`              | `8000`                               | HTTP bind port.                                                         |
-| `MCP_BEARER_TOKEN`      | —                                    | If set with HTTP transport, requires this bearer token on requests.     |
+| `MCP_BEARER_TOKEN`      | —                                    | When set with HTTP transport, requires this bearer token on requests.   |
+| `MCP_ALLOW_UNAUTHENTICATED` | `0`                              | Set to `1` to permit HTTP transport without a bearer token (refused otherwise). |
 | `GARMIN_MCP_NO_CACHE`   | —                                    | Set to `1` to disable in-process TTL caching.                           |
 
 `XDG_CONFIG_HOME` is honoured when `GARMIN_TOKENS_PATH` is unset.
@@ -132,18 +133,37 @@ Alternatively, install the script globally with `uv tool install .` and use the
 
 ## Docker
 
+The image runs HTTP transport by default, listens on `0.0.0.0:8000`, drops to a non-root
+user, and reads tokens from a mounted `/data/tokens` volume. Credentials are never baked
+into the image.
+
 ```bash
 docker build -t garmin-mcp .
-# Bootstrap tokens locally, then mount them into the container:
+```
+
+**One-shot token bootstrap** — run `auth login` interactively against a named volume
+(or a host bind mount), entering credentials and the MFA code at the prompt:
+
+```bash
+docker volume create garmin-tokens
+docker run --rm -it \
+  --entrypoint garmin-mcp \
+  -v garmin-tokens:/data/tokens \
+  -e GARMIN_TOKENS_PATH=/data/tokens \
+  garmin-mcp auth login
+```
+
+**Run the server** with the tokens volume mounted and a bearer token enforced:
+
+```bash
 docker run --rm -p 8000:8000 \
-  -v ~/.config/garmin-mcp/tokens:/data/tokens \
+  -v garmin-tokens:/data/tokens \
   -e MCP_BEARER_TOKEN="$(openssl rand -hex 32)" \
   garmin-mcp
 ```
 
-The image runs HTTP transport by default. Tokens must be bootstrapped on the host (or in a
-disposable container with `auth login`) and mounted into `/data/tokens`. Credentials are
-never baked into the image.
+(If you'd rather bootstrap on the host: run `garmin-mcp auth login` locally and bind-mount
+`~/.config/garmin-mcp/tokens` to `/data/tokens` instead of using a named volume.)
 
 ## Development
 

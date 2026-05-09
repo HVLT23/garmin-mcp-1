@@ -23,6 +23,10 @@ from tests.conftest import get_tool
         (dt.datetime(2026, 5, 9, 3, 59), dt.date(2026, 5, 8)),
         # Midnight → still "before 04:00", so prior night = day before.
         (dt.datetime(2026, 5, 9, 0, 0), dt.date(2026, 5, 8)),
+        # Year boundary: 00:30 on Jan 1 → prior night = Dec 31 of previous year.
+        (dt.datetime(2026, 1, 1, 0, 30), dt.date(2025, 12, 31)),
+        # Year boundary, late evening: 23:00 on Dec 31 → prior night = Dec 31.
+        (dt.datetime(2025, 12, 31, 23, 0), dt.date(2025, 12, 31)),
     ],
 )
 def test_prior_night_date(start, expected) -> None:
