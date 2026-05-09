@@ -1,30 +1,52 @@
-# fly.toml — placeholder. Deployment is a follow-up phase.
+# fly.toml — Fly.io deployment for garmin-mcp.
 #
-# When ready, fill out app/region/services and run:
-#   fly secrets set MCP_BEARER_TOKEN=...
-#   fly volumes create garmin_tokens --size 1
-#   fly deploy
+# This is a single-tenant personal deployment. Region default is Warsaw
+# (`waw`); change `primary_region` to anything closer to you. The app name
+# below is a placeholder — `fly launch` will rewrite it (or override with
+# `fly launch --name <yours>`).
 #
-# Reminder: tokens must be bootstrapped locally (`garmin-mcp auth login`)
-# and uploaded to the volume — never bake creds into the image.
+# Secrets (NEVER bake into this file or the image):
+#   fly secrets set MCP_BEARER_TOKEN=$(openssl rand -hex 32)
+#
+# Tokens are bootstrapped locally with `garmin-mcp auth login` and copied
+# onto the volume via `fly ssh sftp shell` — see README "Deployment".
 
-# app = "garmin-mcp"
-# primary_region = "fra"
-#
-# [build]
-#
-# [env]
-#   MCP_TRANSPORT = "http"
-#   MCP_HOST = "0.0.0.0"
-#   MCP_PORT = "8000"
-#   GARMIN_TOKENS_PATH = "/data/tokens"
-#
-# [[mounts]]
-#   source = "garmin_tokens"
-#   destination = "/data/tokens"
-#
-# [http_service]
-#   internal_port = 8000
-#   force_https = true
-#   auto_stop_machines = true
-#   auto_start_machines = true
+app = "garmin-mcp"
+primary_region = "waw"
+
+[build]
+  # Builds the Dockerfile at the repo root (default builder).
+
+[env]
+  MCP_TRANSPORT = "http"
+  MCP_HOST = "0.0.0.0"
+  MCP_PORT = "8000"
+  GARMIN_TOKENS_PATH = "/data/tokens"
+
+[[mounts]]
+  source = "garmin_tokens"
+  destination = "/data/tokens"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Always-on. The app holds a long-lived Garmin session and a process-local
+  # cache; cold starts would discard both and add a multi-second SSO step
+  # to the first request after each idle window.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1

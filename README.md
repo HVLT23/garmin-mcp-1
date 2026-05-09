@@ -54,7 +54,9 @@ uv run garmin-mcp serve --transport http --host 0.0.0.0 --port 8000
 ```
 
 When `MCP_BEARER_TOKEN` is set, the HTTP transport rejects requests without a matching
-`Authorization: Bearer <token>` header.
+`Authorization: Bearer <token>` header. The single exception is `GET /healthz`, which
+returns `{"status":"ok"}` without auth so liveness probes (Fly.io, Docker `HEALTHCHECK`,
+etc.) can hit it anonymously.
 
 ## Configuration
 
@@ -165,13 +167,83 @@ docker run --rm -p 8000:8000 \
 (If you'd rather bootstrap on the host: run `garmin-mcp auth login` locally and bind-mount
 `~/.config/garmin-mcp/tokens` to `/data/tokens` instead of using a named volume.)
 
+## Deployment (Fly.io)
+
+The repo ships a `fly.toml` and Dockerfile tuned for a single-tenant Fly.io
+deployment: one always-on `shared-cpu-1x` machine with 256 MB RAM, a 1 GB
+volume for tokens, and an HTTP healthcheck against `/healthz`.
+
+**Prerequisites**
+
+- A Fly.io account and `flyctl` installed (`brew install flyctl` or follow
+  the [official installer](https://fly.io/docs/flyctl/install/)).
+- Tokens already bootstrapped locally (`uv run garmin-mcp auth login`).
+  Tokens land in `~/.config/garmin-mcp/tokens` by default.
+
+**One-time setup**
+
+```bash
+# Pick an app name; Fly will reserve <name>.fly.dev for you.
+fly launch --no-deploy --name <app-name> --region waw --copy-config
+
+# Generate and store the bearer token Fly will inject as MCP_BEARER_TOKEN.
+fly secrets set MCP_BEARER_TOKEN=$(openssl rand -hex 32)
+```
+
+`fly.toml` declares the volume (`garmin_tokens`, mounted at `/data/tokens`)
+with `initial_size = "1gb"`, so the volume is created automatically on the
+first deploy. If you'd rather create it explicitly:
+
+```bash
+fly volumes create garmin_tokens --size 1 --region waw
+```
+
+**Bootstrap tokens onto the volume**
+
+After the first deploy, Fly will have created an empty `/data/tokens` on
+the volume. Copy the local tokens up via SSH SFTP:
+
+```bash
+fly ssh sftp shell
+> put -r /home/you/.config/garmin-mcp/tokens /data
+> exit
+```
+
+(`put -r tokens /data` copies the directory in, leaving `/data/tokens` —
+matching `GARMIN_TOKENS_PATH`.)
+
+**Deploy**
+
+```bash
+fly deploy
+```
+
+**Verify**
+
+```bash
+# Anonymous — should return {"status":"ok"}.
+curl https://<app-name>.fly.dev/healthz
+
+# Authenticated MCP endpoint — should not 401.
+curl -H "Authorization: Bearer $MCP_BEARER_TOKEN" https://<app-name>.fly.dev/mcp
+```
+
+**Rotation**
+
+- *Garmin tokens*: re-run `garmin-mcp auth login` locally, then re-upload
+  via `fly ssh sftp shell` (overwrites the volume copy).
+- *Bearer token*: `fly secrets set MCP_BEARER_TOKEN=<new>`; Fly restarts
+  the machine. Update any clients that hold the old token.
+
 ## Limitations / known issues
 
-- **Single-user HTTP deployments only.** The Garmin client (`garminconnect` →
-  `garth.requests.Session`) is not documented as thread-safe. Concurrent tool calls
-  from multiple HTTP clients share a single session and could in theory race during
-  token refresh. The intent is single-user personal automation — if you expose this
-  to multiple concurrent clients, add a per-client lock around tool execution.
+- **Designed for single-user personal use.** `garminconnect` reverse-engineers
+  Garmin's private endpoints — there are no rate-limiting guarantees, and
+  Garmin can break the data shapes at any time. The HTTP transport is safe
+  for parallel tool calls (the embedded Garmin client is wrapped behind a
+  per-instance lock so requests serialise into the underlying session), but
+  the server still represents a single Garmin account and isn't intended
+  for multi-tenant deployment.
 - **Stdout discipline relies on the upstream library.** Stdio MCP requires a clean
   stdout for JSON-RPC framing. The server pushes its own logging to stderr, but if
   `garth` ever calls stdlib `print()` during a mid-session token refresh it could
