@@ -149,9 +149,10 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         zero-step buckets that share the same `primaryActivityLevel` are
         collapsed into a single bucket spanning the run. A typical day
         has ~70% zero-step buckets (sleep + sedentary lulls), so this
-        usually compresses the 96-bucket upstream to ~25-35 buckets
-        (~3x reduction) without losing analytical signal — every non-zero
-        bucket and every activity-level transition survives.
+        usually compresses the 96-bucket upstream to ~58 buckets
+        (~2.2x reduction on a typical mixed day; more on a heavy-sleep /
+        low-activity day) without losing analytical signal — every
+        non-zero bucket and every activity-level transition survives.
 
         Pass verbose=True to get the un-modified upstream response. The
         cache stores the full upstream regardless, so a later verbose=True

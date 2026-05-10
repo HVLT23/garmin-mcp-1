@@ -561,6 +561,9 @@ def trim_steps(payload: Any) -> Any:
 
         steps = entry.get("steps")
         level = entry.get("primaryActivityLevel")
+        # `isinstance(False, int)` is True in Python, so `False == 0` is also
+        # True — without the bool reject a `False`-valued bucket would collapse
+        # as a zero-step bucket. Matches the bool guard in `_compute_stress_buckets`.
         is_zero_run_candidate = steps == 0 and not isinstance(steps, bool)
 
         if is_zero_run_candidate and run_start is not None and level == run_level:
