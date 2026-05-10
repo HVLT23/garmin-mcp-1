@@ -73,6 +73,8 @@ def test_trim_sleep_keeps_daily_sleep_dto_required_fields() -> None:
         "averageRespirationValue",
         "lowestRespirationValue",
         "highestRespirationValue",
+        "averageSpo2Value",
+        "lowestSpo2Value",
         "awakeCount",
         "avgSleepStress",
         "avgHeartRate",
@@ -92,6 +94,10 @@ def test_trim_sleep_keeps_daily_sleep_dto_required_fields() -> None:
     assert daily["sleepScores"]["overall"]["qualifierKey"] == "GOOD"
     assert daily["sleepNeed"]["actual"] == 28800
     assert daily["nextSleepNeed"]["feedback"] == "RECOVER_AFTER_HARD_WORKOUT"
+    # SpO2 is the primary signal for sleep-apnea screening / nocturnal
+    # hypoxia — kept by an explicit decision (M1 from review).
+    assert daily["averageSpo2Value"] == 96
+    assert daily["lowestSpo2Value"] == 90
 
 
 def test_trim_sleep_drops_daily_sleep_dto_noise() -> None:
@@ -99,7 +105,10 @@ def test_trim_sleep_drops_daily_sleep_dto_noise() -> None:
     trimmed = trim_sleep(full)
     daily = trimmed["dailySleepDTO"]
 
-    # Algorithm internals & redundant aliases gone.
+    # Algorithm internals & redundant aliases gone. The dropped-fields list
+    # is the canonical place that documents "this is intentional, not an
+    # oversight" — every field that's in the fixture but neither kept by
+    # the trim nor in the keep-fields test should appear here.
     for dropped in (
         "id",
         "userProfilePK",
@@ -114,6 +123,8 @@ def test_trim_sleep_drops_daily_sleep_dto_noise() -> None:
         "sleepVersion",
         "respirationVersion",
         "skinTempCalibrationDays",
+        "averageStressDuringSleep",
+        "sleepValidation",
         "autoSleepStartTimestampGMT",
         "autoSleepEndTimestampGMT",
         "startTimestampGMT",
@@ -122,39 +133,58 @@ def test_trim_sleep_drops_daily_sleep_dto_noise() -> None:
         assert dropped not in daily, f"{dropped} should be dropped from dailySleepDTO"
 
 
-def test_trim_sleep_keeps_only_overall_in_sleep_scores() -> None:
-    """Only the `overall` score survives — other stages collapse to drop."""
+def test_trim_sleep_keeps_all_sleep_score_stages() -> None:
+    """Every per-stage score (with its qualifierKey) survives — only the
+    algorithm normal-range fields get stripped per stage. The qualifierKey
+    is an LLM-readable judgment and worth ~200 bytes for the whole block.
+    """
     full = load_fixture("sleep_payload_full")
     trimmed = trim_sleep(full)
     scores = trimmed["dailySleepDTO"]["sleepScores"]
 
-    assert set(scores.keys()) == {"overall"}
-    # Algorithm normal-range fields stripped from `overall` (none in this
-    # fixture, but the strip is idempotent on absent keys).
-    overall = scores["overall"]
-    for dropped in ("idealStartInSeconds", "idealEndInSeconds", "optimalStart", "optimalEnd"):
-        assert dropped not in overall
+    # All stages preserved.
+    assert set(scores.keys()) == {
+        "totalDuration",
+        "stress",
+        "awakeCount",
+        "overall",
+        "remPercentage",
+        "lightPercentage",
+        "deepPercentage",
+    }
+
+    # Qualifier keys + values intact.
+    assert scores["totalDuration"]["qualifierKey"] == "GOOD"
+    assert scores["awakeCount"]["qualifierKey"] == "EXCELLENT"
+    assert scores["deepPercentage"]["qualifierKey"] == "FAIR"
+    assert scores["remPercentage"]["value"] == 75
+
+    # Algorithm normal-range fields stripped from every stage that had them.
+    for stage in ("remPercentage", "lightPercentage", "deepPercentage"):
+        for dropped in ("idealStartInSeconds", "idealEndInSeconds", "optimalStart", "optimalEnd"):
+            assert dropped not in scores[stage], f"{stage}.{dropped} should be stripped"
 
 
-def test_trim_sleep_strips_normal_ranges_from_overall_score() -> None:
-    """If `overall` happens to carry normal-range fields, they're dropped."""
+def test_trim_sleep_strips_normal_ranges_from_each_stage() -> None:
+    """Constructed payload: every stage carrying normal-range fields gets stripped."""
     payload = {
         "dailySleepDTO": {
             "sleepScores": {
-                "overall": {
-                    "value": 78,
+                "overall": {"value": 78, "qualifierKey": "GOOD"},
+                "remPercentage": {
+                    "value": 75,
                     "qualifierKey": "GOOD",
                     "optimalStart": 21.0,
                     "optimalEnd": 31.0,
                     "idealStartInSeconds": 5544,
                     "idealEndInSeconds": 8184,
-                }
+                },
             }
         }
     }
-    trimmed = trim_sleep(payload)
-    overall = trimmed["dailySleepDTO"]["sleepScores"]["overall"]
-    assert overall == {"value": 78, "qualifierKey": "GOOD"}
+    scores = trim_sleep(payload)["dailySleepDTO"]["sleepScores"]
+    assert scores["overall"] == {"value": 78, "qualifierKey": "GOOD"}
+    assert scores["remPercentage"] == {"value": 75, "qualifierKey": "GOOD"}
 
 
 def test_trim_sleep_passes_through_non_dict() -> None:
@@ -190,12 +220,14 @@ def test_get_sleep_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> No
 
     upstream_size = len(json.dumps(full))
     trimmed_size = len(json.dumps(result))
-    # The fixture is small (~7KB), but the trim should still produce a
-    # meaningfully smaller payload (we expect ~4x reduction on the fixture
-    # and ~25x on real responses).
-    assert trimmed_size < upstream_size / 2, (
+    # The fixture is small (~7KB) — measured ~2.8x reduction with the
+    # current trim (keeps per-stage sleepScores qualifiers). Floor of
+    # 2.5x catches silent regressions: a trim that drops only one stream
+    # field would yield ~1.2x and trip this. On real ~74KB responses
+    # where the streams dominate the reduction is dramatically larger.
+    assert trimmed_size * 2.5 < upstream_size, (
         f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
-        "expected at least 2x reduction"
+        "expected at least 2.5x reduction on the fixture"
     )
 
     for dropped in (
@@ -219,7 +251,7 @@ def test_get_sleep_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> No
 
 
 def test_get_sleep_verbose_returns_unmodified_upstream(mcp_with_tools, mock_garmin) -> None:
-    """verbose=True preserves the full upstream payload byte-for-byte."""
+    """verbose=True returns a value-equal copy of the full upstream payload."""
     full = load_fixture("sleep_payload_full")
     mock_garmin.get_sleep_data.return_value = full
 

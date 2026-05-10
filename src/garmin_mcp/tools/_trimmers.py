@@ -20,9 +20,9 @@ from __future__ import annotations
 from typing import Any
 
 # Per-minute / per-5-min stream fields dropped by the aggregate tool's
-# lite trim. These five account for ~80% of payload size but no analytical
-# use case consumes them. The standalone `get_sleep` trim drops more via
-# its top-level allowlist (see `_SLEEP_TOP_LEVEL_KEEP`).
+# lite trim. These dominate the upstream payload but no analytical use
+# case consumes them. The standalone `get_sleep` trim drops more via its
+# top-level allowlist (see `_SLEEP_TOP_LEVEL_KEEP`).
 _SLEEP_STREAM_FIELDS = frozenset(
     {
         "sleepMovement",
@@ -54,6 +54,8 @@ _DAILY_SLEEP_DTO_KEEP = frozenset(
         "averageRespirationValue",
         "lowestRespirationValue",
         "highestRespirationValue",
+        "averageSpo2Value",
+        "lowestSpo2Value",
         "awakeCount",
         "avgSleepStress",
         "avgHeartRate",
@@ -125,9 +127,10 @@ def trim_sleep(sleep: Any) -> Any:
       - Dropping every per-minute / per-5-min stream (sleepMovement,
         sleepHeartRate, hrvData, …).
       - Filtering `dailySleepDTO` to a small allowlist (sleep duration,
-        stages, scores, score insights, sleep need).
-      - Keeping `sleepScores.overall` and dropping the algorithm normal
-        ranges (idealStartInSeconds, optimalStart, …).
+        stages, scores, score insights, SpO2, sleep need).
+      - Keeping every `sleepScores` stage (overall + per-stage qualifiers)
+        and stripping the algorithm normal ranges (idealStartInSeconds,
+        optimalStart, …) from each.
       - Dropping cross-cutting noise (id, userProfilePK,
         sleepWindowConfirmed, ageGroup, sleepVersion, …).
 
@@ -147,17 +150,14 @@ def trim_sleep(sleep: Any) -> Any:
         filtered = {k: v for k, v in daily.items() if k in _DAILY_SLEEP_DTO_KEEP}
         scores = filtered.get("sleepScores")
         if isinstance(scores, dict):
-            overall = scores.get("overall")
-            if isinstance(overall, dict):
-                filtered["sleepScores"] = {
-                    "overall": {
-                        k: v for k, v in overall.items() if k not in _SLEEP_SCORE_DROP
-                    }
-                }
-            elif overall is not None:
-                filtered["sleepScores"] = {"overall": overall}
-            else:
-                filtered.pop("sleepScores", None)
+            filtered["sleepScores"] = {
+                stage: (
+                    {k: v for k, v in body.items() if k not in _SLEEP_SCORE_DROP}
+                    if isinstance(body, dict)
+                    else body
+                )
+                for stage, body in scores.items()
+            }
         trimmed["dailySleepDTO"] = filtered
 
     return trimmed
