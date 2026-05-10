@@ -1,9 +1,9 @@
-"""Payload trimmers for sleep/HRV/stress responses.
+"""Payload trimmers for sleep/HRV/stress/body-battery responses.
 
 Shared between the standalone wellness tools (`get_sleep`, `get_hrv`,
-`get_stress`) and the aggregate `get_session_with_context` tool. Two
-strategies are exposed for sleep because the two contexts have different
-needs:
+`get_stress`, `get_body_battery`) and the aggregate
+`get_session_with_context` tool. Two strategies are exposed for sleep
+because the two contexts have different needs:
 
 - `trim_sleep_streams` — drops only the per-minute / per-5-min streams from a
   sleep response. Used by the aggregate tool, which wants the full sleep
@@ -19,6 +19,14 @@ denylist plus an hourly aggregation: the upstream stress response bundles
 hints. We compute one bucket per local hour from the raw samples (avg,
 max, sample/unmeasured counts) and drop the streams + body-battery +
 chart hints + descriptor lists.
+
+`trim_body_battery` operates over a multi-day list (Garmin returns one
+dict per day for a date range). Each per-day dict is filtered with an
+allowlist that keeps the day summary, the compressed transition
+`bodyBatteryValuesArray`, the activity-tied impact events, and the
+short-form dynamic feedback. Descriptor metadata, `userProfilePK`,
+`bodyBatteryVersion`, and the verbose `feedbackLongType` strings are
+dropped.
 
 All strategies treat non-dict input (e.g. error stubs) as a pass-through.
 """
@@ -321,3 +329,124 @@ def trim_stress(stress: Any) -> Any:
     if buckets is not None:
         trimmed["stressBuckets"] = buckets
     return trimmed
+
+
+# Top-level body-battery fields preserved by `trim_body_battery`. Anything
+# else is dropped — including `userProfilePK`, `bodyBatteryVersion` (always
+# 3, internal), `bodyBatteryValueDescriptorDTOList` (descriptor metadata
+# for the values array — the array's first element is always a timestamp
+# and second is always a level, so descriptors add no signal), and any
+# hypothetical verbose secondary array key. The compressed transition
+# `bodyBatteryValuesArray` (typically 6-12 entries of `[ts, level]`) IS
+# kept — it's the high-signal summary the LLM uses to read drain/recharge
+# inflection points across the day.
+_BB_TOP_LEVEL_KEEP = frozenset(
+    {
+        "date",
+        "charged",
+        "drained",
+        "startTimestampGMT",
+        "startTimestampLocal",
+        "endTimestampGMT",
+        "endTimestampLocal",
+        "bodyBatteryValuesArray",
+        "bodyBatteryActivityEvent",
+        "bodyBatteryDynamicFeedbackEvent",
+        "endOfDayBodyBatteryDynamicFeedbackEvent",
+    }
+)
+
+# Fields kept inside each entry of `bodyBatteryActivityEvent`. Each entry
+# describes one sleep/exercise/recovery window and its body-battery impact;
+# we keep the analytic fields (type, time, duration, impact, feedback,
+# linked activity reference) and drop device/audit metadata that the LLM
+# never reasons over.
+_BB_ACTIVITY_EVENT_KEEP = frozenset(
+    {
+        "eventType",
+        "eventStartTimeGmt",
+        "durationInMilliseconds",
+        "bodyBatteryImpact",
+        "feedbackType",
+        "shortFeedback",
+        "activityName",
+        "activityType",
+        "activityId",
+    }
+)
+
+# Fields kept inside each dynamic-feedback event (single-event objects on
+# `bodyBatteryDynamicFeedbackEvent` and `endOfDayBodyBatteryDynamicFeedbackEvent`).
+# `feedbackLongType` is dropped — it duplicates `feedbackShortType` with a
+# verbose suffix (e.g. SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW)
+# that's an internal feedback code, not an LLM-readable summary.
+_BB_DYNAMIC_FEEDBACK_KEEP = frozenset(
+    {
+        "eventTimestampGmt",
+        "bodyBatteryLevel",
+        "feedbackShortType",
+    }
+)
+
+
+def _trim_body_battery_entry(entry: Any) -> Any:
+    """Trim a single per-day body-battery dict.
+
+    Allowlist top level + sub-trim each `bodyBatteryActivityEvent` entry
+    and the two dynamic-feedback event objects. Non-dict inputs and error
+    stubs (dicts with an `error` key) pass through unchanged so list-level
+    iteration keeps diagnostics.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    if "error" in entry:
+        return entry
+
+    trimmed = {k: v for k, v in entry.items() if k in _BB_TOP_LEVEL_KEEP}
+
+    activities = trimmed.get("bodyBatteryActivityEvent")
+    if isinstance(activities, list):
+        trimmed["bodyBatteryActivityEvent"] = [
+            (
+                {k: v for k, v in a.items() if k in _BB_ACTIVITY_EVENT_KEEP}
+                if isinstance(a, dict)
+                else a
+            )
+            for a in activities
+        ]
+
+    for key in ("bodyBatteryDynamicFeedbackEvent", "endOfDayBodyBatteryDynamicFeedbackEvent"):
+        ev = trimmed.get(key)
+        if isinstance(ev, dict):
+            trimmed[key] = {k: v for k, v in ev.items() if k in _BB_DYNAMIC_FEEDBACK_KEEP}
+
+    return trimmed
+
+
+def trim_body_battery(payload: Any) -> Any:
+    """Trim a `get_body_battery` response (multi-day list or single-day dict).
+
+    Garmin's `bodyBattery/reports/daily` endpoint returns a list of dicts,
+    one per day in the requested date range. Each per-day dict carries:
+
+    - day summary (`date`, `charged`, `drained`, four start/end timestamps)
+    - `bodyBatteryValuesArray` — compressed `[[ts, level], ...]` transition
+      list (~6-12 entries, the inflection points)
+    - `bodyBatteryActivityEvent` — list of activity-tied impact entries
+      (sleep, exercise, recovery, etc. with bodyBatteryImpact)
+    - `bodyBatteryDynamicFeedbackEvent` / `endOfDayBodyBatteryDynamicFeedbackEvent` —
+      single-event objects with HIGH/MED/LOW level + short feedback type
+
+    All survive the trim. Algorithm internals (descriptor metadata,
+    `bodyBatteryVersion`, `userProfilePK`), verbose feedback strings
+    (`feedbackLongType`), and per-event device/audit metadata
+    (`deviceId`, `eventUpdateTimeGmt`, `timezoneOffset`) are dropped.
+
+    Operates over a list (the normal Garmin response shape) by mapping
+    over each entry. Single-dict inputs are also accepted defensively.
+    Non-list/non-dict inputs and error stubs pass through unchanged so
+    upstream diagnostics from `safe_call` aren't swallowed.
+    """
+    if isinstance(payload, list):
+        return [_trim_body_battery_entry(entry) for entry in payload]
+    return _trim_body_battery_entry(payload)

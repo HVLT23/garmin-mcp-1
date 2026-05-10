@@ -1,10 +1,10 @@
-"""Tests for the wellness tools — focused on get_sleep / get_stress payload trimming."""
+"""Tests for the wellness tools — focused on get_sleep / get_stress / get_body_battery payload trimming."""
 
 from __future__ import annotations
 
 import json
 
-from garmin_mcp.tools._trimmers import trim_sleep, trim_stress
+from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_stress
 from tests.conftest import get_tool, load_fixture
 
 # ---------------------------------------------------------------------------
@@ -806,3 +806,458 @@ def test_get_stress_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> 
     fn = get_tool(mcp_with_tools, "get_stress")
     result = fn(date="2026-05-09")
     assert result["error"] == "auth_expired"
+
+
+# ---------------------------------------------------------------------------
+# trim_body_battery helper — top-level drop / keep
+# ---------------------------------------------------------------------------
+
+
+def test_trim_body_battery_drops_descriptor_and_internal_metadata() -> None:
+    """The allowlist drops descriptor lists, profile PII, and internal version."""
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+
+    entry = trimmed[0]
+    for dropped in (
+        # Descriptor metadata — the trimmed output uses named keys directly
+        # for everything else and the values array's element shape is
+        # well-known (timestamp + level).
+        "bodyBatteryValueDescriptorDTOList",
+        "bodyBatteryValueDescriptorsDTOList",
+        # PII / auth-leaking.
+        "userProfilePK",
+        "userProfilePk",
+        # Internal algorithm version (always 3 in the wild).
+        "bodyBatteryVersion",
+    ):
+        assert dropped not in entry, f"{dropped} should be dropped from body-battery entry"
+
+
+def test_trim_body_battery_keeps_summary_top_level() -> None:
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    entry = trimmed[0]
+
+    assert entry["date"] == "2026-05-09"
+    assert entry["charged"] == 65
+    assert entry["drained"] == 28
+    assert entry["startTimestampGMT"] == 1746745200000
+    assert entry["startTimestampLocal"] == 1746748800000
+    assert entry["endTimestampGMT"] == 1746831600000
+    assert entry["endTimestampLocal"] == 1746835200000
+
+
+def test_trim_body_battery_keeps_compressed_transition_array() -> None:
+    """The 2-tuple `[ts, level]` transition list survives intact —
+    it's the high-signal summary the LLM uses to read drain/recharge points.
+    """
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    entry = trimmed[0]
+
+    assert "bodyBatteryValuesArray" in entry
+    array = entry["bodyBatteryValuesArray"]
+    assert len(array) == 6
+    assert array[0] == [1746745200000, 30]
+    assert array[-1] == [1746829800000, 67]
+    # Every entry is a 2-tuple — the compressed transition shape, not the
+    # 4-tuple per-3-min verbose form (which is bundled in the stress endpoint).
+    assert all(len(pair) == 2 for pair in array)
+
+
+# Top-level keys the trim emits for a per-day body-battery entry. The trim
+# uses an allowlist (see `_BB_TOP_LEVEL_KEEP`), so a future Garmin field
+# we haven't classified would be silently dropped. This canary asserts the
+# trimmed output's keys are a *subset* of this set — i.e. the trim doesn't
+# emit anything we haven't blessed.
+EXPECTED_BB_TOP_LEVEL_KEYS = frozenset(
+    {
+        "date",
+        "charged",
+        "drained",
+        "startTimestampGMT",
+        "startTimestampLocal",
+        "endTimestampGMT",
+        "endTimestampLocal",
+        "bodyBatteryValuesArray",
+        "bodyBatteryActivityEvent",
+        "bodyBatteryDynamicFeedbackEvent",
+        "endOfDayBodyBatteryDynamicFeedbackEvent",
+    }
+)
+
+
+def test_trim_body_battery_top_level_keys_subset_of_expected() -> None:
+    """Allowlist regression canary.
+
+    If a refactor accidentally widens `_BB_TOP_LEVEL_KEEP` to pass through
+    a noisy field, this catches it. Mirrors the stress trim's canary.
+    """
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    entry = trimmed[0]
+    leaked = set(entry.keys()) - EXPECTED_BB_TOP_LEVEL_KEYS
+    assert not leaked, (
+        f"trim_body_battery emitted unclassified fields: {sorted(leaked)}. "
+        "Either add them to EXPECTED_BB_TOP_LEVEL_KEYS or remove them from "
+        "_BB_TOP_LEVEL_KEEP in _trimmers.py."
+    )
+
+
+# ---------------------------------------------------------------------------
+# trim_body_battery helper — activity event sub-trim
+# ---------------------------------------------------------------------------
+
+
+def test_trim_body_battery_keeps_activity_events_with_required_fields() -> None:
+    """Activity events tie body-battery deltas to specific activities — kept.
+
+    Each entry retains the analytic fields (event type, time, duration,
+    impact, feedback, optional activity reference) and drops device/audit
+    metadata.
+    """
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    events = trimmed[0]["bodyBatteryActivityEvent"]
+
+    assert len(events) == 3
+
+    sleep_event = events[0]
+    assert sleep_event["eventType"] == "SLEEP"
+    assert sleep_event["eventStartTimeGmt"] == 1746745200000
+    assert sleep_event["durationInMilliseconds"] == 21600000
+    assert sleep_event["bodyBatteryImpact"] == 38
+    assert sleep_event["feedbackType"] == "GOOD_SLEEP"
+    assert sleep_event["shortFeedback"] == "GOOD_SLEEP"
+
+    # Activity-tied event preserves the linked activity reference.
+    activity_event = events[1]
+    assert activity_event["eventType"] == "ACTIVITY"
+    assert activity_event["bodyBatteryImpact"] == -15
+    assert activity_event["activityName"] == "Morning Run"
+    assert activity_event["activityType"] == "running"
+    assert activity_event["activityId"] == 1112223334
+
+
+def test_trim_body_battery_drops_activity_event_device_metadata() -> None:
+    """Device IDs, audit timestamps, timezone offsets are dropped per event."""
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    events = trimmed[0]["bodyBatteryActivityEvent"]
+
+    for event in events:
+        for dropped in ("deviceId", "eventUpdateTimeGmt", "timezoneOffset"):
+            assert dropped not in event, f"{dropped} should be dropped from activity event"
+
+
+# ---------------------------------------------------------------------------
+# trim_body_battery helper — dynamic feedback event sub-trim
+# ---------------------------------------------------------------------------
+
+
+def test_trim_body_battery_dynamic_feedback_drops_long_type() -> None:
+    """The verbose `feedbackLongType` is duplicate-with-suffix of `feedbackShortType`.
+
+    Drop it; keep only the timestamp, level (HIGH/MED/LOW/WITHIN_TYPICAL_RANGE),
+    and short type.
+    """
+    full = load_fixture("body_battery_payload_full")
+    trimmed = trim_body_battery(full)
+    entry = trimmed[0]
+
+    feedback = entry["bodyBatteryDynamicFeedbackEvent"]
+    assert feedback == {
+        "eventTimestampGmt": 1746788400000,
+        "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+        "feedbackShortType": "TYPICAL",
+    }
+    assert "feedbackLongType" not in feedback
+
+    end_of_day = entry["endOfDayBodyBatteryDynamicFeedbackEvent"]
+    assert end_of_day == {
+        "eventTimestampGmt": 1746828000000,
+        "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+        "feedbackShortType": "TYPICAL",
+    }
+    assert "feedbackLongType" not in end_of_day
+
+
+# ---------------------------------------------------------------------------
+# trim_body_battery helper — input shape handling
+# ---------------------------------------------------------------------------
+
+
+def test_trim_body_battery_maps_over_multi_day_list() -> None:
+    """A multi-day response (one entry per day) is trimmed entry-by-entry."""
+    full = load_fixture("body_battery_payload_full")
+    day1 = full[0]
+    day2 = dict(day1)
+    day2["date"] = "2026-05-10"
+    day2["charged"] = 80
+    day2["drained"] = 20
+    payload = [day1, day2]
+
+    trimmed = trim_body_battery(payload)
+    assert len(trimmed) == 2
+    assert trimmed[0]["date"] == "2026-05-09"
+    assert trimmed[1]["date"] == "2026-05-10"
+    assert trimmed[1]["charged"] == 80
+    # Both entries had their descriptor metadata dropped.
+    assert "bodyBatteryValueDescriptorDTOList" not in trimmed[0]
+    assert "bodyBatteryValueDescriptorDTOList" not in trimmed[1]
+
+
+def test_trim_body_battery_handles_single_day_dict() -> None:
+    """Defensive: also accept a bare dict, not just a list of dicts."""
+    full = load_fixture("body_battery_payload_full")
+    entry = full[0]
+    trimmed = trim_body_battery(entry)
+    assert isinstance(trimmed, dict)
+    assert trimmed["date"] == "2026-05-09"
+    assert "userProfilePK" not in trimmed
+
+
+def test_trim_body_battery_passes_through_error_stub() -> None:
+    """Error stubs in a list pass through so the diagnostic isn't swallowed."""
+    err = {"error": "fetch_failed", "message": "boom", "section": "body_battery"}
+    assert trim_body_battery([err]) == [err]
+    assert trim_body_battery(err) == err
+
+
+def test_trim_body_battery_passes_through_non_dict_non_list() -> None:
+    assert trim_body_battery(None) is None
+    assert trim_body_battery("oops") == "oops"
+
+
+def test_trim_body_battery_handles_missing_optional_fields() -> None:
+    """Entries with no activity events / no feedback events still work."""
+    payload = [
+        {
+            "date": "2026-05-09",
+            "charged": 50,
+            "drained": 30,
+            "userProfilePK": 999,
+            "bodyBatteryValuesArray": [[0, 50]],
+        }
+    ]
+    trimmed = trim_body_battery(payload)
+    entry = trimmed[0]
+    assert entry["date"] == "2026-05-09"
+    assert entry["charged"] == 50
+    assert "userProfilePK" not in entry
+    assert "bodyBatteryActivityEvent" not in entry
+    assert "bodyBatteryDynamicFeedbackEvent" not in entry
+
+
+# ---------------------------------------------------------------------------
+# get_body_battery tool — verbose flag, payload size, cache behavior
+# ---------------------------------------------------------------------------
+
+
+def test_get_body_battery_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> None:
+    """Default call drops descriptor metadata, internal version, profile PII."""
+    full = load_fixture("body_battery_payload_full")
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09")
+
+    entry = result[0]
+    for dropped in (
+        "userProfilePK",
+        "bodyBatteryValueDescriptorDTOList",
+        "bodyBatteryVersion",
+    ):
+        assert dropped not in entry
+
+    # Required signals present.
+    assert entry["date"] == "2026-05-09"
+    assert entry["charged"] == 65
+    assert entry["drained"] == 28
+    assert len(entry["bodyBatteryValuesArray"]) == 6
+    assert len(entry["bodyBatteryActivityEvent"]) == 3
+    assert entry["bodyBatteryDynamicFeedbackEvent"]["feedbackShortType"] == "TYPICAL"
+    assert "feedbackLongType" not in entry["bodyBatteryDynamicFeedbackEvent"]
+
+
+def test_get_body_battery_default_shrinks_fixture_payload(mcp_with_tools, mock_garmin) -> None:
+    """The fixture-level reduction is modest (~1.5x) — it's a small payload
+    with one day of dropped metadata. The bigger savings show up in the
+    realistic-density test below; this test just establishes a non-trivial
+    floor so a regression that disables trimming is caught.
+    """
+    full = load_fixture("body_battery_payload_full")
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09")
+
+    upstream_size = len(json.dumps(full))
+    trimmed_size = len(json.dumps(result))
+    assert trimmed_size < upstream_size, (
+        f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
+        "expected at least some reduction on the fixture"
+    )
+
+
+def test_get_body_battery_realistic_density_shrinks_payload(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """A realistic 7-day range shrinks meaningfully (~1.5x).
+
+    The body-battery endpoint, unlike stress, does NOT bundle a 480-entry
+    per-3-min sample stream — Garmin returns only the compressed 6-12
+    transition list. So the trim's savings come from per-day repeated
+    metadata (descriptor list, userProfilePK, bodyBatteryVersion,
+    feedbackLongType strings, per-event device/audit fields) rather than
+    a stream we can collapse. Floor of 1.4x catches a regression that
+    disables trimming entirely (ratio would be ~1.0) without falsely
+    flagging the modest reduction the actual upstream allows.
+    """
+    HOUR_MS = 3_600_000
+    full = []
+    for day in range(7):
+        start = 1746745200000 + day * 86_400_000
+        full.append(
+            {
+                "userProfilePK": 12345,
+                "date": f"2026-05-{9 + day:02d}",
+                "charged": 60,
+                "drained": 30,
+                "startTimestampGMT": start,
+                "startTimestampLocal": start + HOUR_MS,
+                "endTimestampGMT": start + 24 * HOUR_MS,
+                "endTimestampLocal": start + 25 * HOUR_MS,
+                "bodyBatteryVersion": 3,
+                "bodyBatteryValueDescriptorDTOList": [
+                    {"bodyBatteryValueDescriptorIndex": 0,
+                     "bodyBatteryValueDescriptorKey": "timestamp"},
+                    {"bodyBatteryValueDescriptorIndex": 1,
+                     "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"},
+                ],
+                "bodyBatteryValuesArray": [
+                    [start + i * 4 * HOUR_MS, 30 + i * 5] for i in range(6)
+                ],
+                "bodyBatteryActivityEvent": [
+                    {
+                        "eventType": "SLEEP",
+                        "eventStartTimeGmt": start,
+                        "eventUpdateTimeGmt": start + 6 * HOUR_MS,
+                        "timezoneOffset": HOUR_MS,
+                        "durationInMilliseconds": 6 * HOUR_MS,
+                        "bodyBatteryImpact": 38,
+                        "feedbackType": "GOOD_SLEEP",
+                        "shortFeedback": "GOOD_SLEEP",
+                        "deviceId": 9876543210,
+                        "activityName": None,
+                        "activityType": None,
+                        "activityId": None,
+                    }
+                ] * 3,
+                "bodyBatteryDynamicFeedbackEvent": {
+                    "eventTimestampGmt": start + 12 * HOUR_MS,
+                    "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+                    "feedbackShortType": "TYPICAL",
+                    "feedbackLongType": "WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY",
+                },
+                "endOfDayBodyBatteryDynamicFeedbackEvent": {
+                    "eventTimestampGmt": start + 23 * HOUR_MS,
+                    "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+                    "feedbackShortType": "TYPICAL",
+                    "feedbackLongType": "SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW",
+                },
+            }
+        )
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09", end_date="2026-05-15")
+
+    upstream_size = len(json.dumps(full))
+    trimmed_size = len(json.dumps(result))
+    assert trimmed_size * 1.4 < upstream_size, (
+        f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
+        "expected at least 1.4x reduction on a 7-day realistic payload"
+    )
+
+
+def test_get_body_battery_verbose_returns_unmodified_upstream(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """verbose=True returns a value-equal copy of the full upstream payload."""
+    full = load_fixture("body_battery_payload_full")
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09", verbose=True)
+
+    assert result == full
+    # The verbose fields are present in the upstream copy.
+    assert "userProfilePK" in result[0]
+    assert "bodyBatteryValueDescriptorDTOList" in result[0]
+    assert "feedbackLongType" in result[0]["bodyBatteryDynamicFeedbackEvent"]
+
+
+def test_get_body_battery_cache_persists_full_upstream(
+    mcp_with_tools, mock_garmin, monkeypatch
+) -> None:
+    """verbose=True after verbose=False hits the cache, returns full upstream.
+
+    The trim runs *outside* the cache layer, so cached entries always store
+    the full upstream and a later verbose=True call does not re-fetch from
+    Garmin.
+    """
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("body_battery_payload_full")
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+
+    trimmed = fn(start_date="2026-05-09")
+    verbose = fn(start_date="2026-05-09", verbose=True)
+
+    assert mock_garmin.get_body_battery.call_count == 1
+    assert verbose == full
+    assert "userProfilePK" not in trimmed[0]
+    assert "userProfilePK" in verbose[0]
+
+    cache.clear_all()
+
+
+def test_get_body_battery_default_no_verbose_kwarg_works(mcp_with_tools, mock_garmin) -> None:
+    """Calling without `verbose` defaults to the trimmed response."""
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09")
+    # Mock returns the small `body_battery` fixture by default — already
+    # has no descriptor metadata, but the trim should still succeed.
+    assert isinstance(result, list)
+    assert result[0]["date"] == "2026-05-09"
+
+
+def test_get_body_battery_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> None:
+    """A Garmin SDK exception bubbles into a structured error via safe_call."""
+    from garminconnect import GarminConnectAuthenticationError
+
+    mock_garmin.get_body_battery.side_effect = GarminConnectAuthenticationError("expired")
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    result = fn(start_date="2026-05-09")
+    assert result["error"] == "auth_expired"
+
+
+def test_get_body_battery_date_range_propagates_to_garmin(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """When end_date is provided, both dates flow to the Garmin SDK call."""
+    full = load_fixture("body_battery_payload_full")
+    mock_garmin.get_body_battery.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_body_battery")
+    fn(start_date="2026-05-01", end_date="2026-05-09")
+
+    mock_garmin.get_body_battery.assert_called_once_with("2026-05-01", "2026-05-09")
