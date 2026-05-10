@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -292,11 +293,13 @@ def test_audit_log_emits_one_line_per_call(caplog) -> None:
     audit_records = [r for r in caplog.records if r.name == "garmin_mcp.audit"]
     assert len(audit_records) == 1
     msg = audit_records[0].getMessage()
-    assert "user=alice" in msg
-    assert "tool=fake_tool" in msg
-    assert "ts=" in msg
-    # Args must NOT be logged.
-    assert "42" not in msg
+    # Strict full-match: args must NOT be logged, and nothing else may sneak in.
+    # A loose `"42" not in msg` substring check was flaky at ~1.7% — whenever the
+    # test ran on a `:42` second, the timestamp `ts=...:42Z` matched and failed.
+    assert re.fullmatch(
+        r"ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z user=alice tool=fake_tool",
+        msg,
+    ), f"audit msg shape regression: {msg!r}"
 
 
 def test_audit_log_uses_legacy_user_when_unset(caplog) -> None:
