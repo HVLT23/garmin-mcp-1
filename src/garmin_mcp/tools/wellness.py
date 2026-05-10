@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
-from garmin_mcp.tools._trimmers import trim_sleep, trim_stress
+from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_stress
 
 ClientFactory = Callable[[], Garmin]
 
@@ -57,20 +57,46 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         result = client_factory().get_hrv_data(coerce_date(date))
         return result or {}
 
+    # Cached fetcher for the full upstream body-battery payload. Same
+    # pattern as `_fetch_sleep` / `_fetch_stress` — caching happens before
+    # trimming so a verbose=True call after a verbose=False call hits the
+    # cache rather than re-fetching.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_body_battery(start_date: str, end_date: str) -> list[dict[str, Any]]:
+        return client_factory().get_body_battery(start_date, end_date) or []
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_body_battery(start_date: str, end_date: str | None = None) -> list[dict[str, Any]]:
+    def get_body_battery(
+        start_date: str, end_date: str | None = None, verbose: bool = False
+    ) -> list[dict[str, Any]]:
         """Body battery readings across a date range (inclusive).
+
+        By default (verbose=False) each per-day entry is trimmed to the
+        analytically useful summary: day-level charged/drained totals, the
+        compressed transition `bodyBatteryValuesArray` (the 6-12 inflection
+        points), per-activity impact events (sleep / exercise / recovery
+        with bodyBatteryImpact), and the dynamic-feedback events (with
+        both short and long feedback codes — the long form sometimes
+        carries narrative context not derivable from the short code).
+        Descriptor metadata, `userProfilePK`, `bodyBatteryVersion`, and
+        per-event device/audit metadata (`deviceId`, `eventUpdateTimeGmt`,
+        `timezoneOffset`) are dropped.
+
+        Pass verbose=True to get the un-modified upstream response. The
+        cache stores the full upstream regardless, so a later verbose=True
+        call hits the cache rather than re-fetching.
 
         Args:
             start_date: ISO start date.
             end_date: ISO end date (defaults to start_date).
+            verbose: If True, return the full upstream payload (default False).
         """
         s = coerce_date(start_date)
         e = coerce_date(end_date) if end_date else s
-        return client_factory().get_body_battery(s, e) or []
+        full = _fetch_body_battery(s, e)
+        return full if verbose else trim_body_battery(full)
 
     # Cached fetcher for the full upstream stress payload. Same pattern as
     # `_fetch_sleep` — caching happens before trimming so a verbose=True

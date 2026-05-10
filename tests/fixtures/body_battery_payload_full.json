@@ -1,0 +1,87 @@
+[
+  {
+    "userProfilePK": 12345,
+    "date": "2026-05-09",
+    "charged": 65,
+    "drained": 28,
+    "startTimestampGMT": 1746745200000,
+    "startTimestampLocal": 1746748800000,
+    "endTimestampGMT": 1746831600000,
+    "endTimestampLocal": 1746835200000,
+    "bodyBatteryVersion": 3,
+    "bodyBatteryValueDescriptorDTOList": [
+      {
+        "bodyBatteryValueDescriptorIndex": 0,
+        "bodyBatteryValueDescriptorKey": "timestamp"
+      },
+      {
+        "bodyBatteryValueDescriptorIndex": 1,
+        "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"
+      }
+    ],
+    "bodyBatteryValuesArray": [
+      [1746745200000, 30],
+      [1746766800000, 50],
+      [1746788400000, 70],
+      [1746810000000, 60],
+      [1746820800000, 45],
+      [1746829800000, 67]
+    ],
+    "bodyBatteryActivityEvent": [
+      {
+        "eventType": "SLEEP",
+        "eventStartTimeGmt": 1746745200000,
+        "eventUpdateTimeGmt": 1746766800000,
+        "timezoneOffset": 3600000,
+        "durationInMilliseconds": 21600000,
+        "bodyBatteryImpact": 38,
+        "feedbackType": "GOOD_SLEEP",
+        "shortFeedback": "GOOD_SLEEP",
+        "deviceId": 9876543210,
+        "activityName": null,
+        "activityType": null,
+        "activityId": null
+      },
+      {
+        "eventType": "ACTIVITY",
+        "eventStartTimeGmt": 1746770400000,
+        "eventUpdateTimeGmt": 1746772200000,
+        "timezoneOffset": 3600000,
+        "durationInMilliseconds": 1800000,
+        "bodyBatteryImpact": -15,
+        "feedbackType": "MODERATE_DRAIN",
+        "shortFeedback": "MODERATE_DRAIN",
+        "deviceId": 9876543210,
+        "activityName": "Morning Run",
+        "activityType": "running",
+        "activityId": 1112223334
+      },
+      {
+        "eventType": "RECOVERY",
+        "eventStartTimeGmt": 1746788400000,
+        "eventUpdateTimeGmt": 1746792000000,
+        "timezoneOffset": 3600000,
+        "durationInMilliseconds": 3600000,
+        "bodyBatteryImpact": 12,
+        "feedbackType": "RECOVERY",
+        "shortFeedback": "RECOVERY",
+        "deviceId": 9876543210,
+        "activityName": null,
+        "activityType": null,
+        "activityId": null
+      }
+    ],
+    "bodyBatteryDynamicFeedbackEvent": {
+      "eventTimestampGmt": 1746788400000,
+      "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+      "feedbackShortType": "TYPICAL",
+      "feedbackLongType": "WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY"
+    },
+    "endOfDayBodyBatteryDynamicFeedbackEvent": {
+      "eventTimestampGmt": 1746828000000,
+      "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+      "feedbackShortType": "TYPICAL",
+      "feedbackLongType": "SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW"
+    }
+  }
+]
