@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
-from garmin_mcp.tools._trimmers import trim_sleep
+from garmin_mcp.tools._trimmers import trim_sleep, trim_stress
 
 ClientFactory = Callable[[], Garmin]
 
@@ -72,13 +72,36 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         e = coerce_date(end_date) if end_date else s
         return client_factory().get_body_battery(s, e) or []
 
+    # Cached fetcher for the full upstream stress payload. Same pattern as
+    # `_fetch_sleep` — caching happens before trimming so a verbose=True
+    # call after a verbose=False call hits the cache rather than re-fetching.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_stress(date: str) -> dict[str, Any]:
+        return client_factory().get_stress_data(date)
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_stress(date: str | None = None) -> dict[str, Any]:
-        """Stress timeline for a given ISO date. Defaults to today."""
-        return client_factory().get_stress_data(coerce_date(date))
+    def get_stress(date: str | None = None, verbose: bool = False) -> dict[str, Any]:
+        """Stress timeline for a given ISO date. Defaults to today.
+
+        By default (verbose=False) the response is trimmed to the
+        analytically useful summary: per-day avg/max stress, duration
+        breakdowns (rest / low / medium / high), and a 24-entry
+        `stressBuckets` aggregation (one per local-day hour with avgStress,
+        maxStress, sampleCount, unmeasuredCount). The 480-sample raw
+        `stressValuesArray`, the bundled body-battery sub-payload (which
+        has its own dedicated `get_body_battery` tool), chart-layout hints,
+        and descriptor metadata are dropped — together they account for
+        most of the ~30KB upstream payload but power no analytical use
+        case the LLM cares about.
+
+        Pass verbose=True to get the un-modified upstream response. The
+        cache stores the full upstream regardless, so a later verbose=True
+        call hits the cache rather than re-fetching.
+        """
+        full = _fetch_stress(coerce_date(date))
+        return full if verbose else trim_stress(full)
 
     @mcp.tool()
     @audited
