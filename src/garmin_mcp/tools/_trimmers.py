@@ -25,6 +25,7 @@ All strategies treat non-dict input (e.g. error stubs) as a pass-through.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # Per-minute / per-5-min stream fields dropped by the aggregate tool's
@@ -211,7 +212,9 @@ _STRESS_DROP_DEFAULT = frozenset(
 _HOUR_MS = 3_600_000
 
 
-def _compute_stress_buckets(samples: Any, start_ts: Any) -> list[dict[str, Any]] | None:
+def _compute_stress_buckets(
+    samples: Any, start_ts: Any, end_ts: Any = None
+) -> list[dict[str, Any]] | None:
     """Aggregate 3-min stress samples into one bucket per local-day hour.
 
     Sample timestamps and `start_ts` must be in the same encoding (both
@@ -220,19 +223,30 @@ def _compute_stress_buckets(samples: Any, start_ts: Any) -> list[dict[str, Any]]
     between them and the sample timestamps are identical, so the chosen
     encoding doesn't change the resulting hour index).
 
+    The day-window upper bound is derived from `end_ts - start_ts` when
+    `end_ts` is provided, so DST fall-back days (25h local day → `hour=24`
+    bucket) and spring-forward days (23h local day → no `hour=23` bucket)
+    are handled honestly. If `end_ts` is missing or invalid, the bound
+    falls back to 24h.
+
     Returns `None` if the inputs are unusable. Otherwise emits a list of
     dicts, one per hour that has at least one sample, sorted by hour.
     Hours with zero samples are omitted (per spec).
 
     Garmin marks unmeasured samples with `-1` (no recent HR) or `-2` (no
     contact). They're counted in `unmeasuredCount` but excluded from
-    `avgStress` / `maxStress`. A bucket whose every sample is unmeasured
-    yields `avgStress: None`, `maxStress: None`.
+    `avgStress` / `maxStress`. NaN levels are also treated as unmeasured
+    (rather than crashing `round()` downstream). A bucket whose every
+    sample is unmeasured yields `avgStress: None`, `maxStress: None`.
     """
     if not isinstance(samples, list) or not samples:
         return None
-    if not isinstance(start_ts, int):
+    if not isinstance(start_ts, (int, float)):
         return None
+
+    max_hour = (
+        int((end_ts - start_ts) // _HOUR_MS) if isinstance(end_ts, (int, float)) else 24
+    )
 
     buckets: dict[int, dict[str, Any]] = {}
     for entry in samples:
@@ -241,15 +255,15 @@ def _compute_stress_buckets(samples: Any, start_ts: Any) -> list[dict[str, Any]]
         ts, level = entry[0], entry[1]
         if not isinstance(ts, (int, float)):
             continue
-        if not isinstance(level, (int, float)):
+        if not isinstance(level, (int, float)) or isinstance(level, bool):
             continue
         hour = int((ts - start_ts) // _HOUR_MS)
-        if hour < 0 or hour >= 24:
-            # Sample falls outside the day window — likely a daylight-saving
-            # boundary. Skip rather than corrupt the bucket layout.
+        if hour < 0 or hour >= max_hour:
+            # Sample falls outside the day window. Skip rather than
+            # corrupt the bucket layout.
             continue
         b = buckets.setdefault(hour, {"sum": 0, "count": 0, "max": None, "unmeasured": 0})
-        if level < 0:
+        if math.isnan(level) or level < 0:
             b["unmeasured"] += 1
         else:
             b["sum"] += level
@@ -299,6 +313,7 @@ def trim_stress(stress: Any) -> Any:
     buckets = _compute_stress_buckets(
         stress.get("stressValuesArray"),
         stress.get("startTimestampGMT"),
+        stress.get("endTimestampGMT"),
     )
 
     drop = _STRESS_DROP_ALWAYS | _STRESS_DROP_DEFAULT
