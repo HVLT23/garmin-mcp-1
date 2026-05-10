@@ -66,8 +66,14 @@ def test_trim_training_status_collapses_single_device_map() -> None:
     assert load_map["trainingBalanceFeedbackPhrase"] == "BALANCED_OPTIMAL"
 
 
-def test_trim_training_status_keeps_multi_device_map() -> None:
-    """Multi-device map preserved so the LLM can disambiguate watches."""
+def test_trim_training_status_keeps_multi_device_map_and_primary_flag() -> None:
+    """Multi-device map preserved AND `primaryTrainingDevice` survives.
+
+    On multi-device users `primaryTrainingDevice` is the only signal
+    distinguishing primary from secondary watches (the surviving map key
+    is opaque). The collapse helper drops it only on the single-device
+    path; the multi-device path preserves it.
+    """
     payload = {
         "mostRecentTrainingStatus": {
             "latestTrainingStatusData": {
@@ -79,25 +85,84 @@ def test_trim_training_status_keeps_multi_device_map() -> None:
     trimmed = trim_training_status(payload)
     latest = trimmed["mostRecentTrainingStatus"]["latestTrainingStatusData"]
     assert set(latest.keys()) == {"1111", "2222"}
-    # Per-device noise still drops on multi-device path.
-    for entry in latest.values():
-        assert "primaryTrainingDevice" not in entry
+    # `primaryTrainingDevice` SURVIVES on multi-device — it's the signal
+    # that tells primary from secondary apart.
+    assert latest["1111"]["primaryTrainingDevice"] is True
+    assert latest["2222"]["primaryTrainingDevice"] is False
+    # `deviceId` would drop unconditionally but isn't present here.
 
 
-def test_trim_training_status_drops_per_device_always_null_fields() -> None:
+def test_trim_training_status_drops_primary_flag_on_single_device_collapse() -> None:
+    """Single-device collapse drops `primaryTrainingDevice` (always True noise)."""
     full = load_fixture("training_status_payload_full")
     trimmed = trim_training_status(full)
     latest = trimmed["mostRecentTrainingStatus"]["latestTrainingStatusData"]
-    # The four always-null device fields are dropped.
+    assert "primaryTrainingDevice" not in latest
+
+    inner = trimmed["mostRecentTrainingLoadBalance"]["metricsTrainingLoadBalanceDTOMap"]
+    assert "primaryTrainingDevice" not in inner
+
+
+def test_trim_training_status_drops_null_per_device_fields() -> None:
+    """The four nullable per-device fields drop when null (the live shape)."""
+    full = load_fixture("training_status_payload_full")
+    trimmed = trim_training_status(full)
+    latest = trimmed["mostRecentTrainingStatus"]["latestTrainingStatusData"]
     for dropped in (
         "weeklyTrainingLoad",
         "loadTunnelMin",
         "loadTunnelMax",
         "loadLevelTrend",
-        "primaryTrainingDevice",
-        "deviceId",
+        "deviceId",  # drops unconditionally
     ):
         assert dropped not in latest
+
+
+def test_trim_training_status_keeps_populated_per_device_fields() -> None:
+    """If Garmin ever populates these fields here, they must NOT be silently
+    dropped — they pass through, and the canary forces a future
+    explicit decision.
+    """
+    payload = {
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                "3458499233": {
+                    "trainingStatus": 3,
+                    "weeklyTrainingLoad": 567.89,
+                    "loadTunnelMin": 380.0,
+                    "loadTunnelMax": 720.0,
+                    "loadLevelTrend": 0,
+                }
+            }
+        }
+    }
+    trimmed = trim_training_status(payload)
+    latest = trimmed["mostRecentTrainingStatus"]["latestTrainingStatusData"]
+    # Single-device collapse → fields surface on the inner dict.
+    assert latest["weeklyTrainingLoad"] == 567.89
+    assert latest["loadTunnelMin"] == 380.0
+    assert latest["loadTunnelMax"] == 720.0
+    assert latest["loadLevelTrend"] == 0
+
+
+def test_trim_training_status_keeps_populated_top_level_heat_altitude() -> None:
+    """If Garmin ever moves `heatAltitudeAcclimationDTO` back to the top
+    level with real data, it must flow through rather than disappear.
+    """
+    populated = {
+        "altitudeAcclimation": 5,
+        "heatAcclimationPercentage": 12,
+    }
+    payload = {"heatAltitudeAcclimationDTO": populated}
+    trimmed = trim_training_status(payload)
+    assert trimmed["heatAltitudeAcclimationDTO"] == populated
+
+
+def test_trim_training_status_drops_null_top_level_heat_altitude() -> None:
+    """Null top-level `heatAltitudeAcclimationDTO` (the live shape) drops."""
+    full = load_fixture("training_status_payload_full")
+    trimmed = trim_training_status(full)
+    assert "heatAltitudeAcclimationDTO" not in trimmed
 
 
 # Top-level keys we expect on a trimmed training-status. The trimmer keeps
@@ -175,6 +240,23 @@ def test_trim_training_load_collapses_device_map() -> None:
     # Per-device noise dropped.
     assert "primaryTrainingDevice" not in inner
     assert "deviceId" not in inner
+
+
+def test_trim_training_load_multi_device_keeps_primary_flag() -> None:
+    """Multi-device load-balance map preserves `primaryTrainingDevice`."""
+    payload = {
+        "mostRecentTrainingLoadBalance": {
+            "metricsTrainingLoadBalanceDTOMap": {
+                "1111": {"monthlyLoadAerobicLow": 412, "primaryTrainingDevice": True},
+                "2222": {"monthlyLoadAerobicLow": 50, "primaryTrainingDevice": False},
+            }
+        }
+    }
+    trimmed = trim_training_load(payload)
+    inner = trimmed["mostRecentTrainingLoadBalance"]["metricsTrainingLoadBalanceDTOMap"]
+    assert set(inner.keys()) == {"1111", "2222"}
+    assert inner["1111"]["primaryTrainingDevice"] is True
+    assert inner["2222"]["primaryTrainingDevice"] is False
 
 
 def test_trim_training_load_returns_empty_when_no_block() -> None:
@@ -425,22 +507,40 @@ def test_trim_vo2_max_passes_through_error_stub() -> None:
 
 
 def test_collapse_device_map_single_device_returns_inner_dict() -> None:
+    """Single-device collapse strips `primaryTrainingDevice` (always-true noise)."""
     out = _collapse_device_map(
         {"3458499233": {"a": 1, "primaryTrainingDevice": True, "b": 2}},
-        frozenset({"primaryTrainingDevice"}),
+        frozenset({"deviceId"}),
     )
     assert out == {"a": 1, "b": 2}
 
 
-def test_collapse_device_map_multi_device_keeps_map() -> None:
+def test_collapse_device_map_multi_device_keeps_primary_flag() -> None:
+    """Multi-device path preserves `primaryTrainingDevice` — it's the signal."""
     out = _collapse_device_map(
         {
             "1111": {"a": 1, "primaryTrainingDevice": True},
             "2222": {"a": 2, "primaryTrainingDevice": False},
         },
-        frozenset({"primaryTrainingDevice"}),
+        frozenset({"deviceId"}),
     )
-    assert out == {"1111": {"a": 1}, "2222": {"a": 2}}
+    assert out == {
+        "1111": {"a": 1, "primaryTrainingDevice": True},
+        "2222": {"a": 2, "primaryTrainingDevice": False},
+    }
+
+
+def test_collapse_device_map_drop_if_null_branch() -> None:
+    """`per_device_drop_if_null` drops the key only when its value is null;
+    populated values flow through.
+    """
+    out = _collapse_device_map(
+        {"3458499233": {"a": 1, "weeklyTrainingLoad": None, "loadTunnelMin": 380}},
+        per_device_drop_always=frozenset(),
+        per_device_drop_if_null=frozenset({"weeklyTrainingLoad", "loadTunnelMin"}),
+    )
+    # `weeklyTrainingLoad` was null → dropped; `loadTunnelMin` was 380 → kept.
+    assert out == {"a": 1, "loadTunnelMin": 380}
 
 
 def test_collapse_device_map_passes_through_non_dict() -> None:

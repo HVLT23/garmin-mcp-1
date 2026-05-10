@@ -41,17 +41,22 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
 
         Defaults to today.
 
-        By default (verbose=False) the response is trimmed: `recordedDevices`
-        (cross-tool repeat), `showSelector` (UI hint), the always-null
-        per-device load fields (`weeklyTrainingLoad`, `loadTunnelMin`/`Max`,
-        `loadLevelTrend`), `primaryTrainingDevice`, and the always-null
-        top-level `heatAltitudeAcclimationDTO` (the populated copy lives
-        at `mostRecentVO2Max.heatAltitudeAcclimation`) are dropped.
-        Single-device `{<deviceId>: {...}}` maps under
-        `latestTrainingStatusData` and `metricsTrainingLoadBalanceDTOMap`
-        are collapsed to the inner dict; multi-device maps survive.
-        PII / `*Local` / image URLs drop at any depth via the cross-cutting
-        final pass.
+        By default (verbose=False) the response is trimmed:
+        `recordedDevices` (cross-tool repeat) and `showSelector` (UI hint)
+        drop unconditionally. The four always-null per-device load fields
+        (`weeklyTrainingLoad`, `loadTunnelMin`/`Max`, `loadLevelTrend`)
+        and the always-null top-level `heatAltitudeAcclimationDTO` (the
+        populated copy lives at `mostRecentVO2Max.heatAltitudeAcclimation`)
+        drop only when null — a future Garmin shape change that puts
+        real data here flows through rather than being silently swallowed.
+        `primaryTrainingDevice` is dropped only on the single-device
+        collapse path (always `True` and noise on a single watch); on
+        multi-device users it survives as the only signal distinguishing
+        primary from secondary watches. Single-device
+        `{<deviceId>: {...}}` maps under `latestTrainingStatusData` and
+        `metricsTrainingLoadBalanceDTOMap` collapse to the inner dict;
+        multi-device maps survive. PII / `*Local` / image URLs drop at
+        any depth via the cross-cutting final pass.
 
         Pass verbose=True to get the un-modified upstream response. The
         cache stores the full upstream regardless, so a later verbose=True
@@ -79,10 +84,12 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         `mostRecentTrainingLoadBalance` only — the previous behaviour
         also returned `mostRecentTrainingStatus` and `mostRecentVO2Max`,
         which were strict-superset duplicates of the dedicated tools.
-        Per-device noise (`primaryTrainingDevice`, `deviceId`) is dropped
-        and the single-device `metricsTrainingLoadBalanceDTOMap` is
-        collapsed to the inner dict (multi-device users keep the map).
-        PII drops via the cross-cutting final pass.
+        `deviceId` drops on every entry; `primaryTrainingDevice` drops
+        only on the single-device collapse path (signal-bearing on
+        multi-device users). The single-device
+        `metricsTrainingLoadBalanceDTOMap` collapses to the inner dict;
+        multi-device users keep the map. PII drops via the cross-cutting
+        final pass.
 
         Pass verbose=True to get the un-modified upstream response (the
         full training-status payload, identical to

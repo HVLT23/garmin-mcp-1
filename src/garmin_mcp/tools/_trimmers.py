@@ -1113,20 +1113,23 @@ def trim_steps(payload: Any) -> Any:
 # only the sub-block relevant to their tool.
 # ---------------------------------------------------------------------------
 
-# Top-level fields dropped from the training-status payload. `userId` drops
-# via the cross-cutting `_strip_pii`; `heatAltitudeAcclimationDTO` is
-# always-null at the top level — the populated copy lives at
-# `mostRecentVO2Max.heatAltitudeAcclimation`.
-_TRAINING_STATUS_TOP_LEVEL_DROP = frozenset(
+# Top-level fields dropped from the training-status payload only when null.
+# `userId` drops at any value via the cross-cutting `_strip_pii`;
+# `heatAltitudeAcclimationDTO` at the top level is always null on the data
+# we've seen (the populated copy lives at
+# `mostRecentVO2Max.heatAltitudeAcclimation`), but if Garmin ever moves
+# real data back to the top level we should let it through rather than
+# silently swallow it.
+_TRAINING_STATUS_TOP_LEVEL_DROP_IF_NULL = frozenset(
     {
         "heatAltitudeAcclimationDTO",
     }
 )
 
-# Fields dropped from `mostRecentTrainingStatus`. `recordedDevices` is a
-# cross-tool repeat (the LLM already has the device on every other tool's
-# payload), `showSelector` is a UI hint. `lastPrimarySyncDate` survives —
-# it's a useful "data freshness" signal.
+# Fields dropped from `mostRecentTrainingStatus` regardless of value.
+# `recordedDevices` is a cross-tool repeat (the LLM already has the device
+# on every other tool's payload), `showSelector` is a UI hint.
+# `lastPrimarySyncDate` survives — it's a useful "data freshness" signal.
 _TRAINING_STATUS_BLOCK_DROP = frozenset(
     {
         "recordedDevices",
@@ -1134,37 +1137,48 @@ _TRAINING_STATUS_BLOCK_DROP = frozenset(
     }
 )
 
-# Per-device noise dropped from each `latestTrainingStatusData` entry.
-# `weeklyTrainingLoad` / `loadTunnelMin` / `loadTunnelMax` / `loadLevelTrend`
-# are always null on the live payload (the populated copies live in
-# `mostRecentTrainingLoadBalance`). `primaryTrainingDevice` is always
-# `True` for a single-device user — drop unconditionally; the device-map
-# collapse below handles the multi-device case by keeping the keyed map.
-# `deviceId` is dropped because it's redundant with the map key (or with
-# the surrounding context once collapsed).
-_TRAINING_STATUS_DEVICE_DROP = frozenset(
+# Per-device fields dropped only when null. These four are perpetually null
+# on the live payload (the populated copies live in
+# `mostRecentTrainingLoadBalance`), but a future Garmin shape change that
+# relocates real data here must not be silently swallowed — so drop only
+# on null and let any non-null value pass through.
+_TRAINING_STATUS_DEVICE_DROP_IF_NULL = frozenset(
     {
         "weeklyTrainingLoad",
         "loadTunnelMin",
         "loadTunnelMax",
         "loadLevelTrend",
-        "primaryTrainingDevice",
-        "deviceId",
     }
 )
 
-# Per-device noise dropped from each `metricsTrainingLoadBalanceDTOMap`
-# entry. `primaryTrainingDevice` mirrors the training-status sibling;
-# `deviceId` is the same redundancy with the map key.
-_TRAINING_LOAD_DEVICE_DROP = frozenset(
+# Per-device fields dropped regardless of value. `deviceId` is redundant
+# with the surrounding map key (or context after a single-device collapse).
+# `primaryTrainingDevice` is intentionally NOT here — it carries signal on
+# multi-device users (`True` on the primary, `False` on secondaries), so
+# the collapse helper drops it only when collapsing to a single device
+# (where it's always `True` and therefore noise).
+_TRAINING_STATUS_DEVICE_DROP_ALWAYS = frozenset(
     {
-        "primaryTrainingDevice",
+        "deviceId",
+    }
+)
+
+# Per-device fields dropped on every `metricsTrainingLoadBalanceDTOMap`
+# entry regardless of value. Same `deviceId` redundancy as the
+# training-status sibling. `primaryTrainingDevice` is again handled
+# conditionally by the collapse helper.
+_TRAINING_LOAD_DEVICE_DROP_ALWAYS = frozenset(
+    {
         "deviceId",
     }
 )
 
 
-def _collapse_device_map(value: Any, per_device_drop: frozenset[str]) -> Any:
+def _collapse_device_map(
+    value: Any,
+    per_device_drop_always: frozenset[str],
+    per_device_drop_if_null: frozenset[str] = frozenset(),
+) -> Any:
     """Trim each device entry; collapse `{deviceId: {...}}` to the inner dict
     when there's exactly one device.
 
@@ -1176,40 +1190,68 @@ def _collapse_device_map(value: Any, per_device_drop: frozenset[str]) -> Any:
     pivot through an unknown numeric ID. On a multi-device user the map is
     preserved so the LLM can still distinguish the watches.
 
-    Each per-device sub-dict has `per_device_drop` keys removed before the
-    collapse decision. Non-dict inputs pass through unchanged so a missing
-    map (already-null upstream) doesn't crash.
+    Each per-device sub-dict has `per_device_drop_always` keys removed
+    unconditionally and `per_device_drop_if_null` keys removed only when
+    null. The conditional-null path lets a future Garmin shape change
+    that relocates real data into one of those keys flow through rather
+    than be silently swallowed.
+
+    `primaryTrainingDevice` is also dropped, but only on the single-device
+    collapse path — on a single watch it's always `True` and therefore
+    noise; on multi-device it's the only signal distinguishing primary
+    from secondaries (the surviving map key is opaque).
+
+    Non-dict inputs pass through unchanged so a missing map (already-null
+    upstream) doesn't crash.
     """
     if not isinstance(value, dict):
         return value
-    cleaned = {
-        device_id: (
-            {k: v for k, v in entry.items() if k not in per_device_drop}
-            if isinstance(entry, dict)
-            else entry
-        )
-        for device_id, entry in value.items()
-    }
+
+    def _clean(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        return {
+            k: v
+            for k, v in entry.items()
+            if k not in per_device_drop_always
+            and not (k in per_device_drop_if_null and v is None)
+        }
+
+    cleaned = {device_id: _clean(entry) for device_id, entry in value.items()}
     if len(cleaned) == 1:
-        return next(iter(cleaned.values()))
+        only = next(iter(cleaned.values()))
+        # On the single-device collapse path `primaryTrainingDevice` is
+        # always `True` and therefore noise; drop it. On multi-device
+        # (the else branch) we preserve it so the LLM can tell which
+        # watch is primary.
+        if isinstance(only, dict):
+            only = {k: v for k, v in only.items() if k != "primaryTrainingDevice"}
+        return only
     return cleaned
 
 
 def trim_training_status(payload: Any) -> Any:
     """Trim a `get_training_status` response.
 
-    Drops:
-      - Top-level `heatAltitudeAcclimationDTO` (always-null sibling — the
-        populated copy lives at `mostRecentVO2Max.heatAltitudeAcclimation`).
+    Drops unconditionally:
       - `mostRecentTrainingStatus.recordedDevices` (cross-tool repeat) and
         `.showSelector` (UI hint).
+      - Per-device `deviceId` (redundant with map key / surrounding context).
+      - PII / `*Local` / image URLs at any depth via `_strip_pii`.
+
+    Drops only when null (so a future Garmin shape change that populates
+    these fields here flows through rather than being silently swallowed):
+      - Top-level `heatAltitudeAcclimationDTO` (always null on current
+        data; the populated copy lives at
+        `mostRecentVO2Max.heatAltitudeAcclimation`).
       - Per-device `weeklyTrainingLoad`, `loadTunnelMin`, `loadTunnelMax`,
         `loadLevelTrend` (always null at this layer; populated copies live
         in `mostRecentTrainingLoadBalance`).
-      - Per-device `primaryTrainingDevice` (always True for single-device
-        users; multi-device disambiguation comes from the surviving map
-        key, not this flag).
-      - PII / `*Local` / image URLs at any depth via `_strip_pii`.
+
+    Drops only on the single-device collapse path:
+      - Per-device `primaryTrainingDevice` (always `True` on a single
+        watch; on multi-device it's the only signal distinguishing
+        primary from secondary, so it survives there).
 
     Collapses single-device `{<deviceId>: {...}}` maps under
     `latestTrainingStatusData` and `metricsTrainingLoadBalanceDTOMap` to
@@ -1224,7 +1266,9 @@ def trim_training_status(payload: Any) -> Any:
         return payload
 
     trimmed: dict[str, Any] = {
-        k: v for k, v in payload.items() if k not in _TRAINING_STATUS_TOP_LEVEL_DROP
+        k: v
+        for k, v in payload.items()
+        if not (k in _TRAINING_STATUS_TOP_LEVEL_DROP_IF_NULL and v is None)
     }
 
     status_block = trimmed.get("mostRecentTrainingStatus")
@@ -1235,7 +1279,9 @@ def trim_training_status(payload: Any) -> Any:
         latest = new_block.get("latestTrainingStatusData")
         if isinstance(latest, dict):
             new_block["latestTrainingStatusData"] = _collapse_device_map(
-                latest, _TRAINING_STATUS_DEVICE_DROP
+                latest,
+                _TRAINING_STATUS_DEVICE_DROP_ALWAYS,
+                _TRAINING_STATUS_DEVICE_DROP_IF_NULL,
             )
         trimmed["mostRecentTrainingStatus"] = new_block
 
@@ -1245,7 +1291,7 @@ def trim_training_status(payload: Any) -> Any:
         per_device = new_load.get("metricsTrainingLoadBalanceDTOMap")
         if isinstance(per_device, dict):
             new_load["metricsTrainingLoadBalanceDTOMap"] = _collapse_device_map(
-                per_device, _TRAINING_LOAD_DEVICE_DROP
+                per_device, _TRAINING_LOAD_DEVICE_DROP_ALWAYS
             )
         trimmed["mostRecentTrainingLoadBalance"] = new_load
 
@@ -1264,7 +1310,9 @@ def trim_training_load(payload: Any) -> Any:
 
     Keeps:
       - `mostRecentTrainingLoadBalance` only, with the device-map collapse
-        applied and per-device `primaryTrainingDevice` / `deviceId` dropped.
+        applied. `deviceId` drops on every entry; `primaryTrainingDevice`
+        drops only on the single-device collapse path (signal-bearing
+        on multi-device users).
 
     Drops:
       - `mostRecentTrainingStatus`, `mostRecentVO2Max`,
@@ -1287,7 +1335,7 @@ def trim_training_load(payload: Any) -> Any:
     per_device = new_load.get("metricsTrainingLoadBalanceDTOMap")
     if isinstance(per_device, dict):
         new_load["metricsTrainingLoadBalanceDTOMap"] = _collapse_device_map(
-            per_device, _TRAINING_LOAD_DEVICE_DROP
+            per_device, _TRAINING_LOAD_DEVICE_DROP_ALWAYS
         )
 
     return _strip_pii({"mostRecentTrainingLoadBalance": new_load})
@@ -1413,10 +1461,12 @@ def trim_training_readiness(payload: Any, *, most_recent_only: bool = True) -> A
     if most_recent_only:
         if not payload:
             return {}
-        # Garmin emits readings sorted newest-first on the live endpoint;
-        # the first element is the most-recent reading. We trust that
-        # ordering rather than re-sorting on `timestamp` — keeping the
-        # behaviour deterministic against an empty / malformed timestamp.
+        # Garmin emits readings newest-first on the live endpoint, so the
+        # first element is the most-recent reading. We trust that ordering
+        # rather than re-sorting on `timestamp` — keeps behaviour
+        # deterministic against an empty / malformed timestamp. Callers
+        # who want to verify ordering or inspect older readings should
+        # pass `verbose=True` to get the un-modified upstream list.
         return _strip_pii(_trim_readiness_reading(payload[0]))
 
     return [_strip_pii(_trim_readiness_reading(r)) for r in payload]
