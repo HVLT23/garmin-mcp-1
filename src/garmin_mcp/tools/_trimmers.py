@@ -90,7 +90,7 @@ _PII_KEYS = frozenset(
 # `readingTimeGmt` vs `readingTimeLocal`). The `*Local` copy is the same
 # wall-clock instant expressed in the user's timezone — given the GMT copy
 # is always present, the LLM can derive local from GMT + offset if needed,
-# so the `*Local` parallel is byte-for-byte redundant (~5–10% per payload).
+# so the `*Local` parallel is byte-for-byte redundant (~5-10% per payload).
 #
 # We restrict to the two suffix shapes Garmin actually emits (`TimeLocal`
 # and `TimestampLocal`) rather than a bare `Local` suffix to avoid
