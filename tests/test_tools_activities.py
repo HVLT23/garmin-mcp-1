@@ -140,8 +140,8 @@ _EXPECTED_SUMMARY_ITEM_KEYS = frozenset(
         "activityName",
         "activityType",
         "eventType",
-        # Timing
-        "startTimeLocal",
+        # Timing — only the GMT copy survives; the parallel `*Local` field
+        # is dropped by the cross-cutting `_strip_pii` pass.
         "startTimeGMT",
         "endTimeGMT",
         "duration",
@@ -550,10 +550,18 @@ def test_trim_activity_detail_drops_empty_sensors_list() -> None:
 
 
 def test_trim_activity_detail_keeps_summary_dto_intact() -> None:
-    """`summaryDTO` is the analytically dense block — pass-through untouched."""
+    """`summaryDTO` is the analytically dense block — pass-through untouched
+    except for the cross-cutting `_strip_pii` pass that drops the `*Local`
+    timestamp parallel.
+    """
     full = load_fixture("activity_payload_full")
     trimmed = trim_activity_detail(full)
-    assert trimmed["summaryDTO"] == full["summaryDTO"]
+    expected = {k: v for k, v in full["summaryDTO"].items() if k != "startTimeLocal"}
+    assert trimmed["summaryDTO"] == expected
+    # `startTimeGMT` is the canonical timestamp — the LLM can derive local
+    # from the timezone offset on `timeZoneUnitDTO` if needed.
+    assert "startTimeLocal" not in trimmed["summaryDTO"]
+    assert trimmed["summaryDTO"]["startTimeGMT"] == full["summaryDTO"]["startTimeGMT"]
 
 
 def test_trim_activity_detail_passes_through_non_dict_and_error() -> None:
