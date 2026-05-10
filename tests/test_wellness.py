@@ -8,6 +8,7 @@ from garmin_mcp.tools._trimmers import (
     _compute_stress_buckets,
     trim_body_battery,
     trim_sleep,
+    trim_steps,
     trim_stress,
 )
 from tests.conftest import get_tool, load_fixture
@@ -1389,3 +1390,255 @@ def test_get_body_battery_date_range_propagates_to_garmin(
     fn(start_date="2026-05-01", end_date="2026-05-09")
 
     mock_garmin.get_body_battery.assert_called_once_with("2026-05-01", "2026-05-09")
+
+
+# ---------------------------------------------------------------------------
+# trim_steps helper — drop / collapse behavior
+# ---------------------------------------------------------------------------
+
+
+# Top-level keys we expect to remain in every surviving steps entry. The
+# trim drops `pushes` and `activityLevelConstant` and passes everything
+# else through, so a future Garmin field would leak through silently. The
+# canary below asserts every entry's keys are a subset of this set — adding
+# a new bloat field to the fixture forces an explicit decision (extend the
+# expected set or extend `_STEPS_DROP_PER_ENTRY`).
+EXPECTED_STEPS_ENTRY_KEYS = frozenset(
+    {"startGMT", "endGMT", "steps", "primaryActivityLevel"}
+)
+
+
+def test_trim_steps_drops_pushes_and_activity_level_constant() -> None:
+    """The drop-list is the canonical place that documents `this is intentional`."""
+    full = load_fixture("steps_payload_full")
+    trimmed = trim_steps(full)
+
+    assert trimmed, "fixture should produce some buckets"
+    for entry in trimmed:
+        # intentional, not oversight
+        assert "pushes" not in entry, "pushes should be dropped from every bucket"
+        assert (
+            "activityLevelConstant" not in entry
+        ), "activityLevelConstant should be dropped from every bucket"
+
+
+def test_trim_steps_entry_keys_subset_of_expected() -> None:
+    """Pass-through regression canary.
+
+    `trim_steps` keeps every field other than the explicit drop list, so a
+    new Garmin field would silently leak through. This catches it — adding
+    a key to the fixture without classifying it (either extend
+    EXPECTED_STEPS_ENTRY_KEYS or extend `_STEPS_DROP_PER_ENTRY`) will
+    fail this test.
+    """
+    full = load_fixture("steps_payload_full")
+    trimmed = trim_steps(full)
+    leaked: set[str] = set()
+    for entry in trimmed:
+        leaked |= set(entry.keys()) - EXPECTED_STEPS_ENTRY_KEYS
+    assert not leaked, (
+        f"trim_steps leaked unclassified fields: {sorted(leaked)}. "
+        "Either add them to EXPECTED_STEPS_ENTRY_KEYS (pass-through) "
+        "or to _STEPS_DROP_PER_ENTRY (drop)."
+    )
+
+
+def test_trim_steps_collapses_contiguous_zero_run_same_level() -> None:
+    """8 sleeping zero-step buckets collapse into a single span."""
+    payload = [
+        {
+            "startGMT": f"2026-05-09T00:{i*15:02d}:00.0",
+            "endGMT": f"2026-05-09T00:{(i+1)*15:02d}:00.0",
+            "steps": 0,
+            "pushes": 0,
+            "primaryActivityLevel": "sleeping",
+            "activityLevelConstant": True,
+        }
+        for i in range(2)
+    ] + [
+        {
+            "startGMT": "2026-05-09T00:30:00.0",
+            "endGMT": "2026-05-09T00:45:00.0",
+            "steps": 0,
+            "pushes": 0,
+            "primaryActivityLevel": "sleeping",
+            "activityLevelConstant": True,
+        }
+    ]
+    # 3 sleeping zero-buckets [00:00..00:15, 00:15..00:30, 00:30..00:45]
+    # should collapse to one [00:00..00:45].
+    trimmed = trim_steps(payload)
+    assert trimmed == [
+        {
+            "startGMT": "2026-05-09T00:00:00.0",
+            "endGMT": "2026-05-09T00:45:00.0",
+            "steps": 0,
+            "primaryActivityLevel": "sleeping",
+        }
+    ]
+
+
+def test_trim_steps_non_zero_in_middle_splits_run() -> None:
+    """A non-zero bucket in the middle of a same-level zero run splits it."""
+    payload = [
+        {"startGMT": "T0", "endGMT": "T1", "steps": 0, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T1", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T2", "endGMT": "T3", "steps": 50, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T3", "endGMT": "T4", "steps": 0, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T4", "endGMT": "T5", "steps": 0, "primaryActivityLevel": "sedentary"},
+    ]
+    trimmed = trim_steps(payload)
+    assert trimmed == [
+        {"startGMT": "T0", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T2", "endGMT": "T3", "steps": 50, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T3", "endGMT": "T5", "steps": 0, "primaryActivityLevel": "sedentary"},
+    ]
+
+
+def test_trim_steps_activity_level_change_ends_run_even_with_zero_steps() -> None:
+    """sleeping → sedentary boundary is preserved even when both sides are zero.
+
+    Wake-up is the kind of transition the LLM reasons over.
+    """
+    payload = [
+        {"startGMT": "T0", "endGMT": "T1", "steps": 0, "primaryActivityLevel": "sleeping"},
+        {"startGMT": "T1", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sleeping"},
+        {"startGMT": "T2", "endGMT": "T3", "steps": 0, "primaryActivityLevel": "sedentary"},
+        {"startGMT": "T3", "endGMT": "T4", "steps": 0, "primaryActivityLevel": "sedentary"},
+    ]
+    trimmed = trim_steps(payload)
+    assert trimmed == [
+        {"startGMT": "T0", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sleeping"},
+        {"startGMT": "T2", "endGMT": "T4", "steps": 0, "primaryActivityLevel": "sedentary"},
+    ]
+
+
+def test_trim_steps_non_zero_buckets_never_collapse() -> None:
+    """Two adjacent same-level buckets with steps > 0 stay distinct."""
+    payload = [
+        {"startGMT": "T0", "endGMT": "T1", "steps": 100, "primaryActivityLevel": "active"},
+        {"startGMT": "T1", "endGMT": "T2", "steps": 200, "primaryActivityLevel": "active"},
+        {"startGMT": "T2", "endGMT": "T3", "steps": 50, "primaryActivityLevel": "active"},
+    ]
+    trimmed = trim_steps(payload)
+    # Every non-zero bucket survives — analytical signal preserved.
+    assert trimmed == payload  # also confirms pushes / activityLevelConstant were absent
+
+
+def test_trim_steps_passes_through_non_list() -> None:
+    assert trim_steps(None) is None
+    assert trim_steps("oops") == "oops"
+    assert trim_steps({"error": "fetch_failed"}) == {"error": "fetch_failed"}
+
+
+def test_trim_steps_error_stub_in_list_passes_through() -> None:
+    """An error stub inside a list flushes the open run and passes through."""
+    err = {"error": "fetch_failed", "message": "boom", "section": "steps"}
+    payload = [
+        {"startGMT": "T0", "endGMT": "T1", "steps": 0, "primaryActivityLevel": "sleeping"},
+        {"startGMT": "T1", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sleeping"},
+        err,
+        {"startGMT": "T2", "endGMT": "T3", "steps": 100, "primaryActivityLevel": "active"},
+    ]
+    trimmed = trim_steps(payload)
+    assert trimmed == [
+        {"startGMT": "T0", "endGMT": "T2", "steps": 0, "primaryActivityLevel": "sleeping"},
+        err,
+        {"startGMT": "T2", "endGMT": "T3", "steps": 100, "primaryActivityLevel": "active"},
+    ]
+
+
+def test_trim_steps_empty_list() -> None:
+    assert trim_steps([]) == []
+
+
+# ---------------------------------------------------------------------------
+# get_steps tool — verbose flag, payload size, cache behavior
+# ---------------------------------------------------------------------------
+
+
+def test_get_steps_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> None:
+    """Default call drops pushes/activityLevelConstant and collapses zero runs."""
+    full = load_fixture("steps_payload_full")
+    mock_garmin.get_steps_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_steps")
+    result = fn(date="2026-05-09")
+
+    # Collapsing always shrinks the live fixture (96 buckets, ~70% zeros).
+    assert len(result) < len(full)
+    upstream_size = len(json.dumps(full))
+    trimmed_size = len(json.dumps(result))
+    # Measured ~3x on Kamil's 2026-05-09 data. Floor of 2x catches a
+    # regression that disables collapsing entirely (~1.1x from drop-only).
+    assert trimmed_size * 2 < upstream_size, (
+        f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
+        "expected at least 2x reduction on the live fixture"
+    )
+
+    for entry in result:
+        assert "pushes" not in entry
+        assert "activityLevelConstant" not in entry
+
+
+def test_get_steps_verbose_returns_unmodified_upstream(mcp_with_tools, mock_garmin) -> None:
+    """verbose=True returns a value-equal copy of the full upstream payload."""
+    full = load_fixture("steps_payload_full")
+    mock_garmin.get_steps_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_steps")
+    result = fn(date="2026-05-09", verbose=True)
+
+    assert result == full
+    # Fields the trim drops are still present in the verbose copy.
+    assert "pushes" in result[0]
+    assert "activityLevelConstant" in result[0]
+
+
+def test_get_steps_cache_persists_full_upstream(mcp_with_tools, mock_garmin, monkeypatch) -> None:
+    """A verbose=True call after a verbose=False call hits the cache.
+
+    The trim runs *outside* the cache layer, so cached entries always store
+    the full upstream and a later verbose=True call does not re-fetch from
+    Garmin.
+    """
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("steps_payload_full")
+    mock_garmin.get_steps_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_steps")
+
+    trimmed = fn(date="2026-05-09")
+    verbose = fn(date="2026-05-09", verbose=True)
+
+    assert mock_garmin.get_steps_data.call_count == 1
+    assert verbose == full
+    assert "pushes" not in trimmed[0]
+    assert "pushes" in verbose[0]
+
+    cache.clear_all()
+
+
+def test_get_steps_default_no_verbose_kwarg_works(mcp_with_tools, mock_garmin) -> None:
+    """Calling without `verbose` defaults to the trimmed response."""
+    fn = get_tool(mcp_with_tools, "get_steps")
+    result = fn(date="2026-05-09")
+    # Mock returns the small `steps` fixture by default; trim it.
+    assert isinstance(result, list)
+    for entry in result:
+        assert "pushes" not in entry
+
+
+def test_get_steps_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> None:
+    """A Garmin SDK exception bubbles into a structured error via safe_call."""
+    from garminconnect import GarminConnectAuthenticationError
+
+    mock_garmin.get_steps_data.side_effect = GarminConnectAuthenticationError("expired")
+
+    fn = get_tool(mcp_with_tools, "get_steps")
+    result = fn(date="2026-05-09")
+    assert result["error"] == "auth_expired"
