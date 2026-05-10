@@ -1,0 +1,100 @@
+{
+  "userProfilePK": 12345,
+  "calendarDate": "2025-05-09",
+  "startTimestampGMT": "2025-05-08T23:00:00.0",
+  "startTimestampLocal": "2025-05-09T00:00:00.0",
+  "endTimestampGMT": "2025-05-09T23:00:00.0",
+  "endTimestampLocal": "2025-05-10T00:00:00.0",
+  "maxStressLevel": 90,
+  "avgStressLevel": 28,
+  "stressDuration": 21600,
+  "restStressDuration": 14400,
+  "lowStressDuration": 18000,
+  "mediumStressDuration": 7200,
+  "highStressDuration": 3600,
+  "stressChartValueOffset": 0,
+  "stressChartYAxisOrigin": -2,
+  "stressValueDescriptorsDTOList": [
+    {"key": "timestamp", "index": 0},
+    {"key": "stressLevel", "index": 1}
+  ],
+  "stressValuesArray": [
+    [1746745200000, 50],
+    [1746747000000, -1],
+    [1746748800000, 60],
+    [1746750600000, 70],
+    [1746752400000, 40],
+    [1746754200000, 30],
+    [1746756000000, -1],
+    [1746757800000, -1],
+    [1746759600000, -2],
+    [1746761400000, 25],
+    [1746763200000, 80],
+    [1746765000000, 90],
+    [1746766800000, 20],
+    [1746768600000, 24],
+    [1746770400000, 20],
+    [1746772200000, 24],
+    [1746774000000, 20],
+    [1746775800000, 24],
+    [1746777600000, 20],
+    [1746779400000, 24],
+    [1746781200000, 20],
+    [1746783000000, 24],
+    [1746784800000, 20],
+    [1746786600000, 24],
+    [1746788400000, 20],
+    [1746790200000, 24],
+    [1746792000000, 20],
+    [1746793800000, 24],
+    [1746795600000, 20],
+    [1746797400000, 24],
+    [1746799200000, 20],
+    [1746801000000, 24],
+    [1746802800000, 20],
+    [1746804600000, 24],
+    [1746806400000, 20],
+    [1746808200000, 24],
+    [1746810000000, 20],
+    [1746811800000, 24],
+    [1746813600000, 20],
+    [1746815400000, 24],
+    [1746817200000, 20],
+    [1746819000000, 24],
+    [1746820800000, 20],
+    [1746822600000, 24],
+    [1746824400000, 20],
+    [1746826200000, 24],
+    [1746828000000, 20],
+    [1746829800000, 24]
+  ],
+  "bodyBatteryValueDescriptorsDTOList": [
+    {"bodyBatteryValueDescriptorIndex": 0, "bodyBatteryValueDescriptorKey": "timestamp"},
+    {"bodyBatteryValueDescriptorIndex": 1, "bodyBatteryValueDescriptorKey": "bodyBatteryStatus"},
+    {"bodyBatteryValueDescriptorIndex": 2, "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"},
+    {"bodyBatteryValueDescriptorIndex": 3, "bodyBatteryValueDescriptorKey": "bodyBatteryVersion"}
+  ],
+  "bodyBatteryValuesArray": [
+    [1746745200000, 30, "ACTIVE", 1.0],
+    [1746766800000, 50, "RESTING", 1.0],
+    [1746788400000, 70, "RESTING", 1.0],
+    [1746810000000, 60, "ACTIVE", 1.0]
+  ],
+  "bodyBatteryActivityEvent": [
+    {
+      "eventType": "ACTIVITY_DETECTION_START",
+      "eventStartTimeGmt": 1746770400000,
+      "durationInMilliseconds": 1800000
+    }
+  ],
+  "bodyBatteryDynamicFeedbackEvent": {
+    "eventTimestampGmt": 1746788400000,
+    "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+    "feedbackShortType": "TYPICAL"
+  },
+  "endOfDayBodyBatteryDynamicFeedbackEvent": {
+    "eventTimestampGmt": 1746828000000,
+    "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
+    "feedbackShortType": "TYPICAL"
+  }
+}
