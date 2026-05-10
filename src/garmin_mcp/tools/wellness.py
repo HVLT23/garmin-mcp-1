@@ -10,20 +10,43 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
+from garmin_mcp.tools._trimmers import trim_sleep
 
 ClientFactory = Callable[[], Garmin]
 
 
 def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
+    # Cached fetcher for the full upstream sleep payload. Caching happens
+    # *here* (before trimming) so a verbose=True call after a verbose=False
+    # call hits the cache rather than re-fetching from Garmin.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_sleep(date: str) -> dict[str, Any]:
+        return client_factory().get_sleep_data(date)
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_sleep(date: str | None = None) -> dict[str, Any]:
+    def get_sleep(date: str | None = None, verbose: bool = False) -> dict[str, Any]:
         """Sleep details (stages, duration, score) for a given ISO date.
+
         Defaults to today.
+
+        By default (verbose=False) the response is trimmed to the analytically
+        useful summary: sleep duration, stage breakdown, sleep score, sleep
+        need, plus a few top-level signals (avgOvernightHrv, restingHeartRate,
+        bodyBatteryChange, …). The per-minute / per-5-min streams
+        (sleepMovement, sleepHeartRate, hrvData.hrvReadings,
+        wellnessEpochRespirationDataDTOList, …) and algorithm internals
+        (id, userProfilePK, sleepFromDevice, sleepVersion, …) are dropped —
+        together they account for ~95% of the upstream payload but power no
+        analytical use case the LLM cares about.
+
+        Pass verbose=True to get the un-modified upstream response for raw
+        stream access. The cache stores the full upstream regardless, so a
+        later verbose=True call hits the cache rather than re-fetching.
         """
-        return client_factory().get_sleep_data(coerce_date(date))
+        full = _fetch_sleep(coerce_date(date))
+        return full if verbose else trim_sleep(full)
 
     @mcp.tool()
     @audited
