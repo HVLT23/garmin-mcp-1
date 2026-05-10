@@ -1,4 +1,4 @@
-"""Payload trimmers for sleep/HRV/stress/body-battery responses.
+"""Payload trimmers for sleep/HRV/stress/body-battery/steps/activity responses.
 
 Shared between the standalone wellness tools (`get_sleep`, `get_hrv`,
 `get_stress`, `get_body_battery`) and the aggregate
@@ -507,6 +507,252 @@ def trim_body_battery(payload: Any) -> Any:
 
 def _clean_steps_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in entry.items() if k not in _STEPS_DROP_PER_ENTRY}
+
+
+# Always-drop noise on each per-activity summary item returned by
+# `list_recent_activities` and `search_activities_by_type`. Three buckets:
+#
+# 1. PII / OAuth / image URLs (~80% of the bloat on a summary item):
+#    `userRoles` is a ~30-entry OAuth scope list duplicated on every
+#    activity; `ownerId` / `ownerDisplayName` / `ownerFullName` are
+#    redundant for an authenticated session; `ownerProfileImageUrl{Small,
+#    Medium,Large}` add ~600 bytes of S3 URLs per item.
+# 2. Constant-value / mostly-default booleans the LLM never reasons over:
+#    `userPro`, `hasVideo`, `hasImages`, `hasHeatMap`, `hasIntensityIntervals`,
+#    `hasSplits`, `hasPolyline` (UI hints); `manufacturer` (always GARMIN),
+#    `parent`, `decoDive`, `qualifyingDive` (always false unless dive
+#    activity), `atpActivity`, `manualActivity`, `purposeful`, `favorite`,
+#    `pr`, `autoCalcCalories`, `elevationCorrected` (all-default booleans).
+# 3. Redundancy / internal identifiers:
+#    `privacy` (always `{typeId:3, typeKey:"subscribers"}` for personal use),
+#    `timeZoneId` (numeric, redundant with start/end timestamps that already
+#    encode offsets), `activityUUID` (`activityId` is the canonical
+#    reference; the UUID is the Garmin-internal alternate key).
+#
+# `summarizedDiveInfo` (always `{summarizedDiveGases: []}` for non-dive
+# activities) and empty `splitSummaries: []` (one allocation per summary
+# item) are dropped conditionally below — empty wrappers carry no signal
+# but populated ones are kept.
+_ACTIVITY_SUMMARY_DROP_ALWAYS = frozenset(
+    {
+        # PII / OAuth / image URLs
+        "userRoles",
+        "ownerId",
+        "ownerDisplayName",
+        "ownerFullName",
+        "ownerProfileImageUrlSmall",
+        "ownerProfileImageUrlMedium",
+        "ownerProfileImageUrlLarge",
+        # UI hints + privacy
+        "privacy",
+        "userPro",
+        "hasVideo",
+        "hasImages",
+        "hasHeatMap",
+        "hasIntensityIntervals",
+        "hasSplits",
+        "hasPolyline",
+        # Default-valued booleans
+        "manufacturer",
+        "parent",
+        "decoDive",
+        "qualifyingDive",
+        "atpActivity",
+        "manualActivity",
+        "purposeful",
+        "favorite",
+        "pr",
+        "autoCalcCalories",
+        "elevationCorrected",
+        # Redundancy / internal identifiers
+        "timeZoneId",
+        "activityUUID",
+        "beginTimestamp",  # Unix-ms duplicate of startTimeGMT
+        "sportTypeId",  # numeric internal; activityType.typeId is canonical
+    }
+)
+
+
+def _trim_activity_summary_item(item: Any) -> Any:
+    """Trim one summary item from `list_recent_activities` / `search_activities_by_type`.
+
+    Non-dict inputs and error stubs (`{"error": ...}` from `safe_call`) pass
+    through unchanged so list-level iteration keeps diagnostics. Surviving
+    fields are everything outside `_ACTIVITY_SUMMARY_DROP_ALWAYS`, plus
+    drops for the conditional cases below (empty `summarizedDiveInfo`
+    wrapper, empty `splitSummaries` list).
+    """
+    if not isinstance(item, dict):
+        return item
+    if "error" in item:
+        return item
+
+    trimmed = {k: v for k, v in item.items() if k not in _ACTIVITY_SUMMARY_DROP_ALWAYS}
+
+    # `summarizedDiveInfo` is always `{"summarizedDiveGases": []}` for
+    # non-dive activities. Drop when it carries no actual dive data — the
+    # `qualifyingDive` flag stays in the always-drop set, but a dive
+    # activity would have a populated `summarizedDiveGases` list.
+    dive = trimmed.get("summarizedDiveInfo")
+    if isinstance(dive, dict):
+        gases = dive.get("summarizedDiveGases")
+        if not gases:  # None or empty list
+            del trimmed["summarizedDiveInfo"]
+
+    # `splitSummaries` is `[]` for non-segmented activities (strength,
+    # boxing, indoor sports). Drop when empty; keep populated lists since
+    # they hold per-segment aggregates (run/walk/stand splits etc.).
+    splits = trimmed.get("splitSummaries")
+    if isinstance(splits, list) and not splits:
+        del trimmed["splitSummaries"]
+
+    return trimmed
+
+
+def trim_activity_summary(payload: Any) -> Any:
+    """Trim a list of activity-summary items (or a single item, defensively).
+
+    Used by both `list_recent_activities` and `search_activities_by_type` —
+    they share the per-activity summary shape. Maps `_trim_activity_summary_item`
+    over each entry. Non-list / non-dict inputs pass through unchanged so
+    upstream diagnostics from `safe_call` aren't swallowed.
+
+    Measured ~2x reduction on Kamil's recent activities (e.g. a 5-item
+    `list_recent_activities` response: 19213 → 8609 chars, 2.23x; a
+    5-item `search_activities_by_type` for running: 17082 → 10795 chars,
+    1.58x — running activities carry more legitimate signal like lat/lng,
+    elevation, power zones, and populated `splitSummaries`, which pulls
+    the ratio down). Drops are dominated by the `userRoles` OAuth scope
+    list and the three S3 profile-image URLs duplicated on every item.
+    """
+    if isinstance(payload, list):
+        return [_trim_activity_summary_item(item) for item in payload]
+    return _trim_activity_summary_item(payload)
+
+
+# Top-level fields kept by `trim_activity_detail`. The live `get_activity`
+# response is a small dict (11 keys); allowlist is more honest than denylist
+# here. Dropped: `accessControlRuleDTO` (privacy stub),
+# `activityUUID` (redundant with `activityId`), `isMultiSportParent`
+# (default false), `userProfileId` (PII for authenticated session).
+_ACTIVITY_DETAIL_TOP_LEVEL_KEEP = frozenset(
+    {
+        "activityId",
+        "activityName",
+        "activityTypeDTO",
+        "eventTypeDTO",
+        "summaryDTO",
+        "timeZoneUnitDTO",
+        "metadataDTO",
+    }
+)
+
+# Fields kept inside `metadataDTO`. The block is almost entirely device /
+# audit metadata + a nested PII block (`userInfoDto` with image URLs);
+# we keep only the small set of fields with downstream analytical value:
+# `lapCount` (helps cross-reference the splits call), and the two upload /
+# update timestamps (data freshness signal). Everything else
+# (`deviceMetaDataDTO`, `userInfoDto`, `eBike*`, the
+# `has{Polyline,HeatMap,…}` UI hints, `isOriginal` / `trimmed` /
+# `personalRecord` / `gcj02` booleans, `manufacturer`, `childIds`,
+# `agentString`, `videoUrl`, etc.) is dropped.
+_ACTIVITY_DETAIL_METADATA_KEEP = frozenset(
+    {
+        "lapCount",
+        "lastUpdateDate",
+        "uploadedDate",
+    }
+)
+
+
+def trim_activity_detail(activity: Any) -> Any:
+    """Trim a `get_activity` response (single activity-detail dict).
+
+    Reduces a ~3KB upstream `get_activity` payload by ~2-3x by:
+      - Allowlisting top-level keys to the small set with analytical value
+        (`activityId`, `activityName`, `activityTypeDTO`, `eventTypeDTO`,
+        `summaryDTO`, `timeZoneUnitDTO`, `metadataDTO`).
+      - Allowlisting `metadataDTO` down to `lapCount` and the two
+        upload/update timestamps — the rest of the block is device /
+        audit metadata + a PII sub-block (`userInfoDto`).
+      - Dropping `accessControlRuleDTO`, `activityUUID`, `isMultiSportParent`,
+        `userProfileId` at top level.
+
+    `summaryDTO` (the analytically dense block: durations, distance,
+    calories, HR, training effect, sport-specific stats) passes through
+    untouched.
+
+    Non-dict inputs and error stubs (dicts with an `error` key — produced
+    by the upstream `safe_call`) pass through unchanged so the diagnostic
+    isn't swallowed by the allowlist trim.
+    """
+    if not isinstance(activity, dict):
+        return activity
+    if "error" in activity:
+        return activity
+
+    trimmed = {k: v for k, v in activity.items() if k in _ACTIVITY_DETAIL_TOP_LEVEL_KEEP}
+
+    meta = trimmed.get("metadataDTO")
+    if isinstance(meta, dict):
+        trimmed["metadataDTO"] = {
+            k: v for k, v in meta.items() if k in _ACTIVITY_DETAIL_METADATA_KEEP
+        }
+
+    return trimmed
+
+
+# Per-lap fields dropped from each `lapDTOs` entry when empty. Both fields
+# are populated only for specific activity types (swim lengths → `lengthDTOs`,
+# Connect IQ apps writing to FIT laps → `connectIQMeasurement`); on a
+# typical run / ride / strength session both are `[]`. Drop only when
+# empty so swimming / Connect IQ data still flows through.
+_ACTIVITY_SPLIT_LAP_DROP_IF_EMPTY = frozenset(
+    {
+        "lengthDTOs",
+        "connectIQMeasurement",
+    }
+)
+
+
+def trim_activity_splits(splits: Any) -> Any:
+    """Trim a `get_activity_splits` response (`{activityId, lapDTOs, eventDTOs}`).
+
+    Drops `eventDTOs` entirely — every entry is a `TIMER_TRIGGER` /
+    `LAP_TRIGGER` marker for auto-pause / manual-lap presses on the watch.
+    The LLM never reasons over them, and a strength session typically
+    carries two such markers per lap (a 1-lap strength session yielded
+    2 events at ~330 bytes; a multi-lap run scales linearly).
+
+    For each `lapDTOs` entry: drop `lengthDTOs` and `connectIQMeasurement`
+    if they're empty lists. Both are populated only for swim / Connect-IQ
+    activities — dropping when empty saves bytes on the common case
+    without disturbing the data-bearing case.
+
+    Non-dict inputs and error stubs pass through unchanged.
+    """
+    if not isinstance(splits, dict):
+        return splits
+    if "error" in splits:
+        return splits
+
+    trimmed = {k: v for k, v in splits.items() if k != "eventDTOs"}
+
+    laps = trimmed.get("lapDTOs")
+    if isinstance(laps, list):
+        trimmed["lapDTOs"] = [_trim_split_lap(lap) for lap in laps]
+
+    return trimmed
+
+
+def _trim_split_lap(lap: Any) -> Any:
+    if not isinstance(lap, dict):
+        return lap
+    return {
+        k: v
+        for k, v in lap.items()
+        if not (k in _ACTIVITY_SPLIT_LAP_DROP_IF_EMPTY and isinstance(v, list) and not v)
+    }
 
 
 def trim_steps(payload: Any) -> Any:
