@@ -35,6 +35,7 @@ All strategies treat non-dict input (e.g. error stubs) as a pass-through.
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 from typing import Any
 
 # Per-minute / per-5-min stream fields dropped by the aggregate tool's
@@ -221,10 +222,42 @@ _STRESS_DROP_DEFAULT = frozenset(
 _HOUR_MS = 3_600_000
 
 
+def _to_unix_ms(value: Any) -> int | float | None:
+    """Coerce a Unix-ms number or ISO 8601 string to Unix-ms.
+
+    The live Garmin stress endpoint returns the surrounding timestamps as
+    ISO 8601 strings (e.g. ``'2026-05-08T22:00:00.0'`` — implicit GMT,
+    trailing tenth) while the sample timestamps inside ``stressValuesArray``
+    are Unix-ms ints. The fixture used by PR #9's tests was Unix-ms
+    throughout, masking the asymmetry. This helper normalises both shapes
+    and returns ``None`` for unparseable input. Naive datetimes are
+    treated as UTC, matching Garmin's GMT-implied encoding.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return int(dt.timestamp() * 1000)
+    return None
+
+
 def _compute_stress_buckets(
     samples: Any, start_ts: Any, end_ts: Any = None
 ) -> list[dict[str, Any]] | None:
     """Aggregate 3-min stress samples into one bucket per local-day hour.
+
+    `start_ts` / `end_ts` accept either Unix-ms numbers or ISO 8601 strings
+    (the live Garmin endpoint returns the surrounding timestamps as ISO
+    strings while the sample timestamps inside `stressValuesArray` stay
+    Unix-ms — see `_to_unix_ms`). Both shapes are coerced to Unix-ms
+    before bucketing.
 
     Sample timestamps and `start_ts` must be in the same encoding (both
     GMT-ms or both local-ms-encoded-as-utc — Garmin returns parallel
@@ -250,12 +283,12 @@ def _compute_stress_buckets(
     """
     if not isinstance(samples, list) or not samples:
         return None
-    if not isinstance(start_ts, (int, float)):
+    start_ts = _to_unix_ms(start_ts)
+    if start_ts is None:
         return None
+    end_ts = _to_unix_ms(end_ts)
 
-    max_hour = (
-        int((end_ts - start_ts) // _HOUR_MS) if isinstance(end_ts, (int, float)) else 24
-    )
+    max_hour = int((end_ts - start_ts) // _HOUR_MS) if end_ts is not None else 24
 
     buckets: dict[int, dict[str, Any]] = {}
     for entry in samples:

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 
-from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_stress
+from garmin_mcp.tools._trimmers import (
+    _compute_stress_buckets,
+    trim_body_battery,
+    trim_sleep,
+    trim_stress,
+)
 from tests.conftest import get_tool, load_fixture
 
 # ---------------------------------------------------------------------------
@@ -652,6 +657,119 @@ def test_trim_stress_omits_buckets_when_start_ts_missing() -> None:
     }
     trimmed = trim_stress(payload)
     assert "stressBuckets" not in trimmed
+
+
+# ---------------------------------------------------------------------------
+# trim_stress helper — ISO 8601 timestamp coercion (production format)
+# ---------------------------------------------------------------------------
+
+
+def test_trim_stress_handles_iso_timestamp_format() -> None:
+    """The live Garmin API returns ISO strings for `start/endTimestampGMT`
+    while the samples in `stressValuesArray` stay Unix-ms. PR #9 shipped a
+    fixture that was Unix-ms throughout, so the type guard `isinstance(..,
+    (int, float))` rejected the live ISO strings and `stressBuckets` was
+    silently dropped in production. This regression test loads a fixture
+    that matches production reality and asserts buckets ARE emitted.
+    """
+    full = load_fixture("stress_payload_iso_timestamps")
+    trimmed = trim_stress(full)
+
+    # The bug: this assert would fail before the fix because buckets was None.
+    assert "stressBuckets" in trimmed
+    buckets = trimmed["stressBuckets"]
+    assert len(buckets) == 24
+    assert [b["hour"] for b in buckets] == list(range(24))
+
+    # Spot-check a few buckets to confirm the same aggregation as the
+    # Unix-ms fixture (same sample data, same expected output).
+    bucket_by_hour = {b["hour"]: b for b in buckets}
+    assert bucket_by_hour[0] == {
+        "hour": 0,
+        "avgStress": 50,
+        "maxStress": 50,
+        "sampleCount": 2,
+        "unmeasuredCount": 1,
+    }
+    assert bucket_by_hour[5] == {
+        "hour": 5,
+        "avgStress": 85,
+        "maxStress": 90,
+        "sampleCount": 2,
+        "unmeasuredCount": 0,
+    }
+
+
+def test_compute_stress_buckets_iso_string_start_ts() -> None:
+    """Direct unit test against the exact production string format
+    (`'2026-05-08T22:00:00.0'` — implicit GMT, single-tenth fractional).
+    """
+    HOUR_MS = 3_600_000
+    # 2026-05-08T22:00:00 UTC == 1778277600000 Unix-ms
+    base_ms = 1778277600000
+    samples = [
+        [base_ms, 30],
+        [base_ms + HOUR_MS, 50],
+        [base_ms + 2 * HOUR_MS, 70],
+    ]
+    buckets = _compute_stress_buckets(
+        samples,
+        "2026-05-08T22:00:00.0",
+        "2026-05-09T22:00:00.0",
+    )
+    assert buckets is not None
+    assert [b["hour"] for b in buckets] == [0, 1, 2]
+    assert buckets[0]["avgStress"] == 30
+    assert buckets[1]["avgStress"] == 50
+    assert buckets[2]["avgStress"] == 70
+
+
+def test_compute_stress_buckets_iso_string_without_fractional() -> None:
+    """ISO strings without a trailing fractional also parse (defensive —
+    Garmin's format has a `.0` today but the surrounding spec doesn't
+    require it).
+    """
+    base_ms = 1778277600000
+    buckets = _compute_stress_buckets(
+        [[base_ms, 42]],
+        "2026-05-08T22:00:00",
+        "2026-05-09T22:00:00",
+    )
+    assert buckets is not None
+    assert buckets[0]["hour"] == 0
+    assert buckets[0]["avgStress"] == 42
+
+
+def test_compute_stress_buckets_unparseable_string_returns_none() -> None:
+    """Garbage strings still yield None rather than crashing."""
+    samples = [[0, 30]]
+    assert _compute_stress_buckets(samples, "not-a-date", None) is None
+    assert _compute_stress_buckets(samples, "", None) is None
+
+
+def test_compute_stress_buckets_unix_ms_path_unchanged() -> None:
+    """Round-trip guard: the existing Unix-ms call site behaves identically
+    after the helper is applied (no regression for the PR #9 path).
+    """
+    HOUR_MS = 3_600_000
+    samples = [[0, 30], [HOUR_MS, 60]]
+    buckets = _compute_stress_buckets(samples, 0, 2 * HOUR_MS)
+    assert buckets == [
+        {
+            "hour": 0,
+            "avgStress": 30,
+            "maxStress": 30,
+            "sampleCount": 1,
+            "unmeasuredCount": 0,
+        },
+        {
+            "hour": 1,
+            "avgStress": 60,
+            "maxStress": 60,
+            "sampleCount": 1,
+            "unmeasuredCount": 0,
+        },
+    ]
 
 
 def test_trim_stress_passes_through_non_dict() -> None:
