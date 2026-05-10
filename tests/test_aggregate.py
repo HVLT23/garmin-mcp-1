@@ -7,10 +7,9 @@ import json
 
 import pytest
 
+from garmin_mcp.tools._trimmers import trim_hrv, trim_sleep_streams
 from garmin_mcp.tools.aggregate import (
     _parse_activity_start,
-    _trim_hrv,
-    _trim_sleep,
     prior_night_date,
 )
 from tests.conftest import get_tool, load_fixture
@@ -181,13 +180,13 @@ def test_aggregate_does_not_cache_partial_failure(
 
 
 # ---------------------------------------------------------------------------
-# Payload trimming: _trim_sleep / _trim_hrv and the verbose flag
+# Payload trimming: trim_sleep_streams / trim_hrv and the verbose flag
 # ---------------------------------------------------------------------------
 
 
-def test_trim_sleep_drops_per_minute_streams() -> None:
+def test_trim_sleep_streams_drops_per_minute_streams() -> None:
     full = load_fixture("sleep_payload_full")
-    trimmed = _trim_sleep(full)
+    trimmed = trim_sleep_streams(full)
 
     # Per-minute streams gone.
     for dropped in (
@@ -212,14 +211,14 @@ def test_trim_sleep_drops_per_minute_streams() -> None:
     assert trimmed["hrvData"]["status"] == "BALANCED"
 
 
-def test_trim_sleep_passes_through_non_dict() -> None:
-    assert _trim_sleep(None) is None
-    assert _trim_sleep({"error": "fetch_failed"}) == {"error": "fetch_failed"}
+def test_trim_sleep_streams_passes_through_non_dict() -> None:
+    assert trim_sleep_streams(None) is None
+    assert trim_sleep_streams({"error": "fetch_failed"}) == {"error": "fetch_failed"}
 
 
 def test_trim_hrv_drops_readings_array() -> None:
     full = load_fixture("hrv_payload_full")
-    trimmed = _trim_hrv(full)
+    trimmed = trim_hrv(full)
 
     assert "hrvReadings" not in trimmed
     assert trimmed["hrvSummary"]["lastNightAvg"] == 55
@@ -228,7 +227,7 @@ def test_trim_hrv_drops_readings_array() -> None:
 
 
 def test_trim_hrv_passes_through_non_dict() -> None:
-    assert _trim_hrv("oops") == "oops"
+    assert trim_hrv("oops") == "oops"
 
 
 def test_aggregate_default_payload_is_trimmed_and_under_15kb(
