@@ -461,6 +461,14 @@ def _trim_body_battery_entry(entry: Any) -> Any:
     return trimmed
 
 
+# Per-bucket fields dropped from every steps entry by `trim_steps`. `pushes`
+# is always 0 for non-wheelchair users (when/if wheelchair mode lands we'll
+# gate this behind a feature flag — out of scope here). `activityLevelConstant`
+# is an algorithm-internal "was this bucket's activity level steady?" hint
+# the LLM never reasons over.
+_STEPS_DROP_PER_ENTRY = frozenset({"pushes", "activityLevelConstant"})
+
+
 def trim_body_battery(payload: Any) -> Any:
     """Trim a `get_body_battery` response (multi-day list or single-day dict).
 
@@ -488,3 +496,88 @@ def trim_body_battery(payload: Any) -> Any:
     if isinstance(payload, list):
         return [_trim_body_battery_entry(entry) for entry in payload]
     return _trim_body_battery_entry(payload)
+
+
+def _clean_steps_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in entry.items() if k not in _STEPS_DROP_PER_ENTRY}
+
+
+def trim_steps(payload: Any) -> Any:
+    """Trim a `get_steps` response (list of 96 fixed 15-min buckets).
+
+    Garmin's `usersummary-service/stats/steps/daily/...` endpoint returns a
+    bare list of 96 fixed-width 15-min buckets for the day. On a typical
+    day ~70% of those buckets are zero-step (sleep + sedentary lulls), so
+    we collapse contiguous zero-step runs that share the same
+    `primaryActivityLevel` into a single bucket whose window spans the
+    full run. Concretely the trim:
+
+    - drops `pushes` from every entry (always 0 unless wheelchair mode —
+      out of scope here; revisit behind a feature flag if/when supported)
+    - drops `activityLevelConstant` from every entry (algorithm internal)
+    - collapses contiguous runs of zero-step buckets that share the same
+      `primaryActivityLevel` into one bucket spanning the run (start of
+      first, end of last). Non-zero `steps` or an activity-level change
+      ends a run — even a same-level zero-to-zero transition is preserved
+      across an activity-level boundary (e.g. sleeping→sedentary at
+      wake-up is information worth keeping).
+
+    Non-zero buckets are never collapsed even if adjacent buckets share
+    the same activity level — every signal where the user actually moved
+    survives.
+
+    Non-list inputs pass through unchanged. Inside a list, error stubs
+    (dicts with an `error` key — produced by the upstream `safe_call`)
+    and non-dict entries pass through unchanged so list-level iteration
+    keeps diagnostics. Surviving entries keep every field other than the
+    two dropped above, so a future Garmin field auto-passes-through; the
+    test suite's allowlist canary catches additions.
+    """
+    if not isinstance(payload, list):
+        return payload
+
+    out: list[Any] = []
+    run_start: dict[str, Any] | None = None
+    run_end: dict[str, Any] | None = None
+    run_level: Any = None
+
+    def _flush() -> None:
+        nonlocal run_start, run_end, run_level
+        if run_start is None:
+            return
+        collapsed = _clean_steps_entry(run_start)
+        if run_end is not None and run_end is not run_start:
+            collapsed["endGMT"] = run_end.get("endGMT", collapsed.get("endGMT"))
+        out.append(collapsed)
+        run_start = None
+        run_end = None
+        run_level = None
+
+    for entry in payload:
+        if not isinstance(entry, dict) or "error" in entry:
+            _flush()
+            out.append(entry)
+            continue
+
+        steps = entry.get("steps")
+        level = entry.get("primaryActivityLevel")
+        # `isinstance(False, int)` is True in Python, so `False == 0` is also
+        # True — without the bool reject a `False`-valued bucket would collapse
+        # as a zero-step bucket. Matches the bool guard in `_compute_stress_buckets`.
+        is_zero_run_candidate = steps == 0 and not isinstance(steps, bool)
+
+        if is_zero_run_candidate and run_start is not None and level == run_level:
+            run_end = entry
+            continue
+
+        _flush()
+
+        if is_zero_run_candidate:
+            run_start = entry
+            run_end = entry
+            run_level = level
+        else:
+            out.append(_clean_steps_entry(entry))
+
+    _flush()
+    return out

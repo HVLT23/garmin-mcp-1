@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
-from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_stress
+from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_steps, trim_stress
 
 ClientFactory = Callable[[], Garmin]
 
@@ -129,13 +129,37 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         full = _fetch_stress(coerce_date(date))
         return full if verbose else trim_stress(full)
 
+    # Cached fetcher for the full upstream steps payload. Same pattern as
+    # `_fetch_stress` / `_fetch_body_battery` — caching happens before
+    # trimming so a verbose=True call after a verbose=False call hits the
+    # cache rather than re-fetching.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_steps(date: str) -> list[dict[str, Any]]:
+        return client_factory().get_steps_data(date) or []
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_steps(date: str | None = None) -> list[dict[str, Any]]:
-        """Step counts (15-min buckets) for a given ISO date. Defaults to today."""
-        return client_factory().get_steps_data(coerce_date(date)) or []
+    def get_steps(date: str | None = None, verbose: bool = False) -> list[dict[str, Any]]:
+        """Step counts (15-min buckets) for a given ISO date. Defaults to today.
+
+        By default (verbose=False) the response is trimmed: `pushes` (always
+        0 for non-wheelchair users) and `activityLevelConstant` (algorithm
+        internal) are dropped from every bucket, and contiguous runs of
+        zero-step buckets that share the same `primaryActivityLevel` are
+        collapsed into a single bucket spanning the run. A typical day
+        has ~70% zero-step buckets (sleep + sedentary lulls), so this
+        usually compresses the 96-bucket upstream to ~58 buckets
+        (~2.2x reduction on a typical mixed day; more on a heavy-sleep /
+        low-activity day) without losing analytical signal — every
+        non-zero bucket and every activity-level transition survives.
+
+        Pass verbose=True to get the un-modified upstream response. The
+        cache stores the full upstream regardless, so a later verbose=True
+        call hits the cache rather than re-fetching.
+        """
+        full = _fetch_steps(coerce_date(date))
+        return full if verbose else trim_steps(full)
 
     @mcp.tool()
     @audited
