@@ -7,6 +7,7 @@ import json
 from garmin_mcp.tools._trimmers import (
     _compute_stress_buckets,
     trim_body_battery,
+    trim_daily_summary,
     trim_hrv,
     trim_sleep,
     trim_steps,
@@ -1820,5 +1821,432 @@ def test_get_hrv_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> Non
     mock_garmin.get_hrv_data.side_effect = GarminConnectAuthenticationError("expired")
 
     fn = get_tool(mcp_with_tools, "get_hrv")
+    result = fn(date="2026-05-09")
+    assert result["error"] == "auth_expired"
+
+
+# ---------------------------------------------------------------------------
+# trim_daily_summary helper — drop locks + conditional Spo2 / abnormalHr
+# ---------------------------------------------------------------------------
+
+
+# Top-level keys the trim emits on a typical no-Spo2 day. Acts as a canary:
+# a future Garmin field appearing in the upstream payload (or one of these
+# keys disappearing) fails this test fast so we revisit the trim instead of
+# silently shipping the new field. Built from the surviving keys on Kamil's
+# 2026-05-09 fixture; an additive Garmin change forces an explicit decision.
+_EXPECTED_DAILY_SUMMARY_KEYS = frozenset(
+    {
+        "calendarDate",
+        "dailyStepGoal",
+        "durationInMilliseconds",
+        # Calorie + distance summary
+        "totalKilocalories",
+        "activeKilocalories",
+        "bmrKilocalories",
+        "burnedKilocalories",
+        "consumedKilocalories",
+        "remainingKilocalories",
+        "netCalorieGoal",
+        "netRemainingKilocalories",
+        "totalDistanceMeters",
+        "restingCaloriesFromActivity",
+        # Steps + activity-time breakdown
+        "totalSteps",
+        "highlyActiveSeconds",
+        "activeSeconds",
+        "sedentarySeconds",
+        "sleepingSeconds",
+        # Floors
+        "floorsAscended",
+        "floorsDescended",
+        "floorsAscendedInMeters",
+        "floorsDescendedInMeters",
+        "userFloorsAscendedGoal",
+        # Intensity minutes
+        "moderateIntensityMinutes",
+        "vigorousIntensityMinutes",
+        "intensityMinutesGoal",
+        # Heart rate
+        "minHeartRate",
+        "maxHeartRate",
+        "restingHeartRate",
+        "lastSevenDaysAvgRestingHeartRate",
+        "minAvgHeartRate",
+        "maxAvgHeartRate",
+        # Stress
+        "averageStressLevel",
+        "maxStressLevel",
+        "stressDuration",
+        "stressPercentage",
+        "stressQualifier",
+        "restStressDuration",
+        "restStressPercentage",
+        "activityStressDuration",
+        "activityStressPercentage",
+        "uncategorizedStressDuration",
+        "uncategorizedStressPercentage",
+        "totalStressDuration",
+        "lowStressDuration",
+        "lowStressPercentage",
+        "mediumStressDuration",
+        "mediumStressPercentage",
+        "highStressDuration",
+        "highStressPercentage",
+        "measurableAwakeDuration",
+        "measurableAsleepDuration",
+        # Body battery summary values (the per-day numbers, not the events
+        # — those are dropped as cross-tool duplicates)
+        "bodyBatteryChargedValue",
+        "bodyBatteryDrainedValue",
+        "bodyBatteryHighestValue",
+        "bodyBatteryLowestValue",
+        "bodyBatteryMostRecentValue",
+        "bodyBatteryDuringSleep",
+        "bodyBatteryAtWakeTime",
+        # Spo2 (kept conditionally — see _DAILY_SUMMARY_SPO2_FIELDS)
+        "averageSpo2",
+        "lowestSpo2",
+        "latestSpo2",
+        "latestSpo2ReadingTimeGmt",
+        "latestSpo2ReadingTimeLocal",
+        # Respiration summary (no per-minute stream; just the numbers)
+        "avgWakingRespirationValue",
+        "highestRespirationValue",
+        "lowestRespirationValue",
+        "latestRespirationValue",
+        "latestRespirationTimeGMT",
+        # Wellness window timestamps
+        "wellnessStartTimeGmt",
+        "wellnessStartTimeLocal",
+        "wellnessEndTimeGmt",
+        "wellnessEndTimeLocal",
+        # Misc
+        "averageMonitoringEnvironmentAltitude",
+        # Conditional medical signal — kept only when non-null
+        "abnormalHeartRateAlertsCount",
+    }
+)
+
+
+def test_trim_daily_summary_drops_pii_and_identifiers() -> None:
+    """userProfileId / userDailySummaryId / uuid drop unconditionally."""
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+    # PII / identifiers
+    assert "userProfileId" not in result
+    assert "userDailySummaryId" not in result
+    assert "uuid" not in result
+
+
+def test_trim_daily_summary_drops_privacy_source_version_metadata() -> None:
+    """Privacy / source / algorithm-version / sync metadata drop unconditionally."""
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+    assert "rule" not in result
+    assert "privacyProtected" not in result
+    assert "source" not in result
+    assert "bodyBatteryVersion" not in result
+    assert "respirationAlgorithmVersion" not in result
+    assert "wellnessDescription" not in result
+    assert "lastSyncTimestampGMT" not in result
+
+
+def test_trim_daily_summary_drops_includes_flags() -> None:
+    """`includes{Wellness,Activity,CalorieConsumed}Data` are UI hints; drop."""
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+    assert "includesWellnessData" not in result
+    assert "includesActivityData" not in result
+    assert "includesCalorieConsumedData" not in result
+
+
+def test_trim_daily_summary_drops_wellness_aliases_keeps_canonical() -> None:
+    """`wellness*` aliases drop; the non-alias copy survives byte-equal.
+
+    On every payload we've seen, `wellnessKilocalories == totalKilocalories`,
+    `wellnessActiveKilocalories == activeKilocalories`, and
+    `wellnessDistanceMeters == totalDistanceMeters`. Drop the alias.
+    """
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+    assert "wellnessKilocalories" not in result
+    assert "wellnessActiveKilocalories" not in result
+    assert "wellnessDistanceMeters" not in result
+    # The non-alias copies survive with their upstream values intact.
+    assert result["totalKilocalories"] == 3043.0
+    assert result["activeKilocalories"] == 705.0
+    assert result["totalDistanceMeters"] == 5829
+
+
+def test_trim_daily_summary_drops_body_battery_cross_tool_duplicates() -> None:
+    """Body-battery sub-payloads are covered by `get_body_battery`; drop here."""
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+    assert "bodyBatteryActivityEventList" not in result
+    assert "bodyBatteryDynamicFeedbackEvent" not in result
+    assert "endOfDayBodyBatteryDynamicFeedbackEvent" not in result
+    # The per-day body-battery summary *numbers* (not the events) survive —
+    # they're cheap and sit alongside the rest of the day's totals.
+    assert result["bodyBatteryChargedValue"] == 57
+    assert result["bodyBatteryDrainedValue"] == 62
+    assert result["bodyBatteryHighestValue"] == 61
+
+
+def test_trim_daily_summary_drops_spo2_block_when_all_null() -> None:
+    """All Spo2 fields drop together when every reading is null."""
+    full = load_fixture("daily_summary_payload_full")
+    # Sanity-check the fixture matches the precondition (no Spo2 readings).
+    assert full["averageSpo2"] is None
+    assert full["lowestSpo2"] is None
+    assert full["latestSpo2"] is None
+
+    result = trim_daily_summary(full)
+    assert "averageSpo2" not in result
+    assert "lowestSpo2" not in result
+    assert "latestSpo2" not in result
+    assert "latestSpo2ReadingTimeGmt" not in result
+    assert "latestSpo2ReadingTimeLocal" not in result
+
+
+def test_trim_daily_summary_keeps_spo2_block_when_any_reading_populated() -> None:
+    """A non-null Spo2 reading flips the whole block back on."""
+    full = load_fixture("daily_summary_payload_full")
+    full = {
+        **full,
+        "averageSpo2": 96,
+        "lowestSpo2": 92,
+        "latestSpo2": 95,
+        "latestSpo2ReadingTimeGmt": "2026-05-09T05:30:00.0",
+        "latestSpo2ReadingTimeLocal": "2026-05-09T07:30:00.0",
+    }
+    result = trim_daily_summary(full)
+    assert result["averageSpo2"] == 96
+    assert result["lowestSpo2"] == 92
+    assert result["latestSpo2"] == 95
+    assert result["latestSpo2ReadingTimeGmt"] == "2026-05-09T05:30:00.0"
+    assert result["latestSpo2ReadingTimeLocal"] == "2026-05-09T07:30:00.0"
+
+
+def test_trim_daily_summary_keeps_spo2_block_when_only_one_reading_populated() -> None:
+    """Even a single non-null reading keeps the whole block (no partial drop)."""
+    full = load_fixture("daily_summary_payload_full")
+    full = {**full, "averageSpo2": 97}  # lowest/latest stay null
+    result = trim_daily_summary(full)
+    assert result["averageSpo2"] == 97
+    # The other Spo2 fields survive (as null) — partial-drop would lose them.
+    assert "lowestSpo2" in result
+    assert "latestSpo2" in result
+    assert "latestSpo2ReadingTimeGmt" in result
+    assert "latestSpo2ReadingTimeLocal" in result
+
+
+def test_trim_daily_summary_drops_abnormal_hr_alerts_when_null() -> None:
+    """`abnormalHeartRateAlertsCount` is null on a normal day → drop."""
+    full = load_fixture("daily_summary_payload_full")
+    assert full["abnormalHeartRateAlertsCount"] is None
+    result = trim_daily_summary(full)
+    assert "abnormalHeartRateAlertsCount" not in result
+
+
+def test_trim_daily_summary_keeps_abnormal_hr_alerts_when_populated() -> None:
+    """A non-null `abnormalHeartRateAlertsCount` is a medical signal; keep."""
+    full = load_fixture("daily_summary_payload_full")
+    full = {**full, "abnormalHeartRateAlertsCount": 2}
+    result = trim_daily_summary(full)
+    assert result["abnormalHeartRateAlertsCount"] == 2
+
+
+def test_trim_daily_summary_keeps_abnormal_hr_alerts_zero_boundary() -> None:
+    """Boundary: `0` (checked, no alerts) is a meaningful signal — keep.
+
+    Pins the `is None` predicate against a future drive-by `if not value:`
+    regression that would falsy-collapse `0` into the drop branch and lose
+    the "monitoring ran and reported zero alerts" signal.
+    """
+    full = load_fixture("daily_summary_payload_full")
+    full = {**full, "abnormalHeartRateAlertsCount": 0}
+    result = trim_daily_summary(full)
+    assert result["abnormalHeartRateAlertsCount"] == 0
+
+
+# Keys that are in `_EXPECTED_DAILY_SUMMARY_KEYS` but may legitimately be
+# absent from a trimmed result — the conditional drops fire when the
+# upstream readings are null. Excluded from the "required keys present"
+# direction of the bidirectional canary so a no-Spo2 / no-abnormal-HR day
+# doesn't trip the silent-loss check. The Spo2 conditional + abnormal-HR
+# conditional both have their own dedicated tests, so removing them from
+# the required-set doesn't weaken coverage.
+_DAILY_SUMMARY_CONDITIONAL_KEYS = frozenset(
+    {
+        "averageSpo2",
+        "lowestSpo2",
+        "latestSpo2",
+        "latestSpo2ReadingTimeGmt",
+        "latestSpo2ReadingTimeLocal",
+        "abnormalHeartRateAlertsCount",
+    }
+)
+
+
+def test_trim_daily_summary_keys_match_expected_bidirectional() -> None:
+    """Bidirectional canary: trimmed keys are *exactly* the expected set
+    (modulo the conditionally-dropped fields).
+
+    The trim uses a denylist (so additive Garmin fields auto-pass-through),
+    but that means a future *bloat* field would leak silently AND a future
+    over-aggressive denylist extension would silently drop a should-keep
+    field. Both directions:
+
+      - subset check: every emitted key is in `_EXPECTED_DAILY_SUMMARY_KEYS`
+        — catches additive bloat (a new upstream key survives the trim).
+      - superset check: every required key is present in the result —
+        catches silent loss (the trim accidentally drops, say,
+        `restingHeartRate`). The conditional Spo2 + abnormal-HR fields are
+        excluded from this direction since they're absent on the no-Spo2
+        / no-alert fixture by design.
+    """
+    full = load_fixture("daily_summary_payload_full")
+    result = trim_daily_summary(full)
+
+    unexpected = set(result.keys()) - _EXPECTED_DAILY_SUMMARY_KEYS
+    assert not unexpected, (
+        f"trim emitted unexpected top-level keys: {sorted(unexpected)}; "
+        "either add to _EXPECTED_DAILY_SUMMARY_KEYS or add to the denylist"
+    )
+
+    required = _EXPECTED_DAILY_SUMMARY_KEYS - _DAILY_SUMMARY_CONDITIONAL_KEYS
+    missing = required - set(result.keys())
+    assert not missing, (
+        f"trim silently dropped required keys: {sorted(missing)}; "
+        "the denylist likely over-extended — keep these in the trimmed output"
+    )
+
+
+def test_trim_daily_summary_passes_through_non_dict() -> None:
+    """Non-dict / empty / None inputs pass through unchanged."""
+    assert trim_daily_summary(None) is None
+    assert trim_daily_summary([]) == []
+    assert trim_daily_summary({}) == {}
+    assert trim_daily_summary("oops") == "oops"
+
+
+def test_trim_daily_summary_passes_through_error_stub() -> None:
+    """Error stubs from `safe_call` aren't swallowed by the trim."""
+    stub = {"error": "auth_expired", "remediation": "rotate token"}
+    assert trim_daily_summary(stub) == stub
+
+
+# ---------------------------------------------------------------------------
+# get_daily_summary tool — verbose flag, payload size, cache behavior
+# ---------------------------------------------------------------------------
+
+
+def test_get_daily_summary_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> None:
+    """Default call drops PII / wellness aliases / body-battery duplicates."""
+    full = load_fixture("daily_summary_payload_full")
+    mock_garmin.get_user_summary.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
+    result = fn(date="2026-05-09")
+
+    # Spot-check one field from each drop category.
+    assert "userProfileId" not in result
+    assert "wellnessKilocalories" not in result
+    assert "bodyBatteryActivityEventList" not in result
+    # The kept canary still holds.
+    assert set(result.keys()) <= _EXPECTED_DAILY_SUMMARY_KEYS
+    # Daily totals survive byte-equivalent.
+    assert result["totalSteps"] == full["totalSteps"]
+    assert result["totalKilocalories"] == full["totalKilocalories"]
+
+
+def test_get_daily_summary_default_reduction_ratio_floor(mcp_with_tools, mock_garmin) -> None:
+    """Trimmed response is at least 1.5x smaller than the upstream fixture.
+
+    Measured ~1.9x on Kamil's 2026-05-09 live data (~4.1KB → ~2.2KB).
+    Floor of 1.5x catches a regression that disables the trim or a payload
+    shape that pushes the ratio below the threshold.
+    """
+    full = load_fixture("daily_summary_payload_full")
+    mock_garmin.get_user_summary.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
+    trimmed = fn(date="2026-05-09")
+
+    upstream_size = len(json.dumps(full))
+    trimmed_size = len(json.dumps(trimmed))
+    assert trimmed_size * 1.5 <= upstream_size, (
+        f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
+        "expected at least 1.5x reduction"
+    )
+
+
+def test_get_daily_summary_verbose_returns_unmodified_upstream(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """verbose=True returns a value-equal copy of the full upstream payload."""
+    full = load_fixture("daily_summary_payload_full")
+    mock_garmin.get_user_summary.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
+    result = fn(date="2026-05-09", verbose=True)
+
+    assert result == full
+    # Fields the trim drops are still present in the verbose copy.
+    assert "userProfileId" in result
+    assert "wellnessKilocalories" in result
+    assert "bodyBatteryActivityEventList" in result
+
+
+def test_get_daily_summary_cache_persists_full_upstream(
+    mcp_with_tools, mock_garmin, monkeypatch
+) -> None:
+    """A verbose=True call after a verbose=False call hits the cache.
+
+    The trim runs *outside* the cache layer, so cached entries always store
+    the full upstream and a later verbose=True call does not re-fetch from
+    Garmin.
+    """
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("daily_summary_payload_full")
+    mock_garmin.get_user_summary.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
+
+    trimmed = fn(date="2026-05-09")
+    verbose = fn(date="2026-05-09", verbose=True)
+
+    assert mock_garmin.get_user_summary.call_count == 1
+    assert verbose == full
+    assert "userProfileId" not in trimmed
+    assert "userProfileId" in verbose
+
+    cache.clear_all()
+
+
+def test_get_daily_summary_default_no_verbose_kwarg_works(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """Calling without `verbose` defaults to the trimmed response."""
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
+    result = fn(date="2026-05-09")
+    # Mock returns the small `daily_summary` fixture by default; it has no
+    # bloat fields to drop, so we just check the trimmed response is a dict.
+    assert isinstance(result, dict)
+    assert "userProfileId" not in result
+
+
+def test_get_daily_summary_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> None:
+    """A Garmin SDK exception bubbles into a structured error via safe_call."""
+    from garminconnect import GarminConnectAuthenticationError
+
+    mock_garmin.get_user_summary.side_effect = GarminConnectAuthenticationError("expired")
+
+    fn = get_tool(mcp_with_tools, "get_daily_summary")
     result = fn(date="2026-05-09")
     assert result["error"] == "auth_expired"

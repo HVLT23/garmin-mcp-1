@@ -807,6 +807,129 @@ def _trim_split_lap(lap: Any) -> Any:
     }
 
 
+# Cross-tool noise + identifiers stripped from `get_daily_summary` regardless
+# of value. Three buckets:
+#
+# 1. PII / identifiers (parity with `trim_stress` / `trim_body_battery`):
+#    `userProfileId`, `userDailySummaryId`, `uuid`. The latter two are
+#    Garmin-internal alternate keys with no analytical use.
+# 2. Privacy / source / version / sync metadata: `rule` (always
+#    `{typeId:3, typeKey:"subscribers"}`), `privacyProtected` (always false),
+#    `source` (always `"GARMIN"`), `bodyBatteryVersion` /
+#    `respirationAlgorithmVersion` (algorithm internals), `wellnessDescription`
+#    (always null), `lastSyncTimestampGMT` (device-sync metadata).
+# 3. UI / availability hints: `includesWellnessData`, `includesActivityData`,
+#    `includesCalorieConsumedData`.
+# 4. Wellness aliases: `wellnessKilocalories`, `wellnessActiveKilocalories`,
+#    `wellnessDistanceMeters` are byte-for-byte equal to `totalKilocalories`
+#    / `activeKilocalories` / `totalDistanceMeters` on every payload we've
+#    seen — keep the non-`wellness*` copy, drop the alias.
+# 5. Cross-tool body-battery duplicates: `bodyBatteryActivityEventList`,
+#    `bodyBatteryDynamicFeedbackEvent`, `endOfDayBodyBatteryDynamicFeedbackEvent`
+#    are also returned (in equivalent shape) by `get_body_battery`. Drop
+#    the daily-summary copies; the dedicated body-battery tool is the
+#    single source of truth for this data.
+_DAILY_SUMMARY_DROP_ALWAYS = frozenset(
+    {
+        # PII / identifiers
+        "userProfileId",
+        "userDailySummaryId",
+        "uuid",
+        # Privacy / source / version / sync metadata
+        "rule",
+        "privacyProtected",
+        "source",
+        "bodyBatteryVersion",
+        "respirationAlgorithmVersion",
+        "wellnessDescription",
+        "lastSyncTimestampGMT",
+        # UI / availability hints
+        "includesWellnessData",
+        "includesActivityData",
+        "includesCalorieConsumedData",
+        # Wellness aliases (duplicate of non-wellness fields)
+        "wellnessKilocalories",
+        "wellnessActiveKilocalories",
+        "wellnessDistanceMeters",
+        # Cross-tool body-battery duplicates (covered by `get_body_battery`)
+        "bodyBatteryActivityEventList",
+        "bodyBatteryDynamicFeedbackEvent",
+        "endOfDayBodyBatteryDynamicFeedbackEvent",
+    }
+)
+
+# Spo2 fields dropped together when no Spo2 reading was captured. On a
+# wrist-worn device without overnight Spo2 enabled (or during a day with
+# no measurement window) all three readings are null and the two
+# timestamp fields are null too — five `null` keys per day. When ANY
+# reading is non-null the whole block survives. Mirrors the conditional
+# eBike-telemetry pass-through in `trim_activity_detail`.
+_DAILY_SUMMARY_SPO2_FIELDS = frozenset(
+    {
+        "averageSpo2",
+        "lowestSpo2",
+        "latestSpo2",
+        "latestSpo2ReadingTimeGmt",
+        "latestSpo2ReadingTimeLocal",
+    }
+)
+
+
+def trim_daily_summary(summary: Any) -> Any:
+    """Trim a `get_daily_summary` response.
+
+    Reduces a ~4.5KB upstream payload by ~1.4-1.5x by dropping three
+    categories of noise:
+
+      - Cross-tool duplicates that have a dedicated tool:
+        `bodyBatteryActivityEventList`, `bodyBatteryDynamicFeedbackEvent`,
+        `endOfDayBodyBatteryDynamicFeedbackEvent` (all in `get_body_battery`).
+      - Wellness aliases: `wellnessKilocalories`, `wellnessActiveKilocalories`,
+        `wellnessDistanceMeters` (byte-equal to the non-`wellness*` copies).
+      - PII / identifiers / version / privacy / sync metadata:
+        `userProfileId`, `userDailySummaryId`, `uuid`, `rule`,
+        `privacyProtected`, `source`, `bodyBatteryVersion`,
+        `respirationAlgorithmVersion`, `wellnessDescription`,
+        `lastSyncTimestampGMT`, `includes{Wellness,Activity,CalorieConsumed}Data`.
+
+    Conditional drops:
+      - All Spo2 fields (`averageSpo2`, `lowestSpo2`, `latestSpo2`,
+        `latestSpo2ReadingTimeGmt`, `latestSpo2ReadingTimeLocal`) drop
+        together when every reading is null. When any reading is non-null
+        the whole block survives — mirrors the populated-eBike-telemetry
+        pass-through in `trim_activity_detail`.
+      - `abnormalHeartRateAlertsCount` drops when null (the common case);
+        a non-null value is a medical signal and survives.
+
+    Every other field passes through, so the daily-summary numbers
+    (calories, steps, intensity minutes, RHR, stress percentages,
+    body-battery summary values, respiration summary, …) are untouched.
+
+    Non-dict inputs and error stubs (dicts with an `error` key — produced
+    by the upstream `safe_call`) pass through unchanged so the diagnostic
+    isn't swallowed by the trim.
+    """
+    if not isinstance(summary, dict):
+        return summary
+    if "error" in summary:
+        return summary
+
+    drop = set(_DAILY_SUMMARY_DROP_ALWAYS)
+
+    # Conditional Spo2 drop: only suppress when *no* reading exists. Any
+    # non-null value flips the whole block back on — including the two
+    # timestamp fields, which are only meaningful alongside a reading.
+    if all(summary.get(k) is None for k in ("averageSpo2", "lowestSpo2", "latestSpo2")):
+        drop |= _DAILY_SUMMARY_SPO2_FIELDS
+
+    # `abnormalHeartRateAlertsCount` is null on a normal day and worth
+    # keeping when populated (medical signal). Drop only on null.
+    if summary.get("abnormalHeartRateAlertsCount") is None:
+        drop = drop | {"abnormalHeartRateAlertsCount"}
+
+    return {k: v for k, v in summary.items() if k not in drop}
+
+
 def trim_steps(payload: Any) -> Any:
     """Trim a `get_steps` response (list of 96 fixed 15-min buckets).
 

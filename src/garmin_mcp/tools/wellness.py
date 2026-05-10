@@ -12,6 +12,7 @@ from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
 from garmin_mcp.tools._trimmers import (
     trim_body_battery,
+    trim_daily_summary,
     trim_hrv,
     trim_sleep,
     trim_steps,
@@ -188,13 +189,47 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         full = _fetch_steps(coerce_date(date))
         return full if verbose else trim_steps(full)
 
+    # Cached fetcher for the full upstream daily-summary payload. Same
+    # pattern as `_fetch_sleep` / `_fetch_stress` — caching happens before
+    # trimming so a verbose=True call after a verbose=False call hits the
+    # cache rather than re-fetching.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_daily_summary(date: str) -> dict[str, Any]:
+        return client_factory().get_user_summary(date) or {}
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_daily_summary(date: str | None = None) -> dict[str, Any]:
+    def get_daily_summary(date: str | None = None, verbose: bool = False) -> dict[str, Any]:
         """Daily user summary (steps, calories, intensity minutes, RHR, etc.).
 
         Defaults to today.
+
+        By default (verbose=False) the response is trimmed to the analytically
+        useful summary: every numeric daily total (calories, steps, distance,
+        intensity minutes, floors), the active/sedentary/sleeping seconds,
+        the heart-rate summary (resting / min / max / 7-day avg), the stress
+        block (durations + percentages + qualifier), the body-battery summary
+        values, the respiration summary, and the wellness window timestamps.
+        Dropped:
+
+          - Cross-tool body-battery duplicates (`bodyBatteryActivityEventList`,
+            `bodyBatteryDynamicFeedbackEvent`,
+            `endOfDayBodyBatteryDynamicFeedbackEvent`) — `get_body_battery`
+            is the dedicated tool.
+          - Wellness aliases (`wellnessKilocalories`,
+            `wellnessActiveKilocalories`, `wellnessDistanceMeters`) — equal
+            to the `total*` / `active*` copies.
+          - PII / identifiers / version / privacy / sync metadata
+            (`userProfileId`, `uuid`, `rule`, `bodyBatteryVersion`, …).
+          - Spo2 fields when every reading is null. A populated Spo2 block
+            survives.
+          - `abnormalHeartRateAlertsCount` when null (a non-null value is a
+            medical signal and survives).
+
+        Pass verbose=True to get the un-modified upstream response. The
+        cache stores the full upstream regardless, so a later verbose=True
+        call hits the cache rather than re-fetching.
         """
-        return client_factory().get_user_summary(coerce_date(date))
+        full = _fetch_daily_summary(coerce_date(date))
+        return full if verbose else trim_daily_summary(full)
