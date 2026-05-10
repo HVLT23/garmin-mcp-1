@@ -1,0 +1,103 @@
+{
+  "userId": 121491731,
+  "mostRecentVO2Max": {
+    "userId": 121491731,
+    "generic": {
+      "calendarDate": "2026-05-03",
+      "vo2MaxValue": 49,
+      "vo2MaxPreciseValue": 49.4,
+      "fitnessAge": null,
+      "fitnessAgeDescription": null,
+      "maxMetCategory": 0
+    },
+    "cycling": null,
+    "heatAltitudeAcclimation": {
+      "calendarDate": "2026-05-09",
+      "altitudeAcclimationDate": "2026-05-09",
+      "previousAltitudeAcclimationDate": "2026-05-08",
+      "heatAcclimationDate": "2026-05-09",
+      "previousHeatAcclimationDate": "2026-05-08",
+      "altitudeAcclimation": 0,
+      "previousAltitudeAcclimation": 0,
+      "heatAcclimationPercentage": 0,
+      "previousHeatAcclimationPercentage": 0,
+      "currentAltitude": 250,
+      "previousAltitude": 250,
+      "acclimationPercentage": 0,
+      "previousAcclimationPercentage": 0,
+      "altitudeTrend": "STABLE",
+      "heatTrend": "DEACCLIMATIZING"
+    }
+  },
+  "mostRecentTrainingLoadBalance": {
+    "userId": 121491731,
+    "metricsTrainingLoadBalanceDTOMap": {
+      "3458499233": {
+        "calendarDate": "2026-05-09",
+        "deviceId": 3458499233,
+        "monthlyLoadAerobicLow": 412,
+        "monthlyLoadAerobicLowTargetMin": 250,
+        "monthlyLoadAerobicLowTargetMax": 600,
+        "monthlyLoadAerobicHigh": 188,
+        "monthlyLoadAerobicHighTargetMin": 100,
+        "monthlyLoadAerobicHighTargetMax": 300,
+        "monthlyLoadAnaerobic": 64,
+        "monthlyLoadAnaerobicTargetMin": 30,
+        "monthlyLoadAnaerobicTargetMax": 150,
+        "trainingBalanceFeedbackPhrase": "BALANCED_OPTIMAL",
+        "primaryTrainingDevice": true
+      }
+    }
+  },
+  "mostRecentTrainingStatus": {
+    "userId": 121491731,
+    "latestTrainingStatusData": {
+      "3458499233": {
+        "weeklyTrainingLoad": null,
+        "loadTunnelMin": null,
+        "loadTunnelMax": null,
+        "loadLevelTrend": null,
+        "trainingStatus": 3,
+        "trainingStatusFeedbackPhrase": "PRODUCTIVE_CARDIO_3",
+        "calendarDate": "2026-05-09",
+        "deviceId": 3458499233,
+        "primaryTrainingDevice": true,
+        "acuteTrainingLoadDTO": {
+          "acwrPercent": 77,
+          "acwrStatus": "OPTIMAL",
+          "acwrStatusFeedback": "OPTIMAL_GOOD",
+          "dailyTrainingLoadAcute": 360,
+          "maxTrainingLoadChronic": 470.0,
+          "minTrainingLoadChronic": 280.0,
+          "dailyTrainingLoadChronic": 380.0,
+          "dailyAcuteChronicWorkloadRatio": 0.95
+        },
+        "vO2MaxPreciseValue": 49.4,
+        "vO2MaxValue": 49,
+        "fitnessTrend": 0,
+        "fitnessTrendSport": "GENERIC",
+        "loadRatio": 0.95,
+        "trainingPaused": false,
+        "sinceDate": "2026-04-20",
+        "weeksAtMaintaining": 0,
+        "weeksAtProductive": 3,
+        "weeksAtPeaking": 0,
+        "weeksAtOverreaching": 0,
+        "weeksAtUnproductive": 0,
+        "weeksAtRecovery": 0,
+        "weeksAtDetraining": 0,
+        "weeksAtStrained": 0
+      }
+    },
+    "recordedDevices": [
+      {
+        "deviceId": 3458499233,
+        "deviceName": "fenix 7 Pro",
+        "imageURL": "https://res.garmin.com/en/photos/abc123/fenix7pro.png"
+      }
+    ],
+    "showSelector": false,
+    "lastPrimarySyncDate": "2026-05-10"
+  },
+  "heatAltitudeAcclimationDTO": null
+}

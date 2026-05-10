@@ -1103,3 +1103,438 @@ def trim_steps(payload: Any) -> Any:
 
     _flush()
     return _strip_pii(out)
+
+
+# ---------------------------------------------------------------------------
+# Training-tools trimmers (training_status / training_load / training_readiness
+# / vo2_max). All four tools share the same upstream `get_training_status`
+# response shape — see `trim_training_status` for the full denylist
+# rationale; the load/vo2 helpers reuse the same nested cleanup but extract
+# only the sub-block relevant to their tool.
+# ---------------------------------------------------------------------------
+
+# Top-level fields dropped from the training-status payload only when null.
+# `userId` drops at any value via the cross-cutting `_strip_pii`;
+# `heatAltitudeAcclimationDTO` at the top level is always null on the data
+# we've seen (the populated copy lives at
+# `mostRecentVO2Max.heatAltitudeAcclimation`), but if Garmin ever moves
+# real data back to the top level we should let it through rather than
+# silently swallow it.
+_TRAINING_STATUS_TOP_LEVEL_DROP_IF_NULL = frozenset(
+    {
+        "heatAltitudeAcclimationDTO",
+    }
+)
+
+# Fields dropped from `mostRecentTrainingStatus` regardless of value.
+# `recordedDevices` is a cross-tool repeat (the LLM already has the device
+# on every other tool's payload), `showSelector` is a UI hint.
+# `lastPrimarySyncDate` survives — it's a useful "data freshness" signal.
+_TRAINING_STATUS_BLOCK_DROP = frozenset(
+    {
+        "recordedDevices",
+        "showSelector",
+    }
+)
+
+# Per-device fields dropped only when null. These four are perpetually null
+# on the live payload (the populated copies live in
+# `mostRecentTrainingLoadBalance`), but a future Garmin shape change that
+# relocates real data here must not be silently swallowed — so drop only
+# on null and let any non-null value pass through.
+_TRAINING_STATUS_DEVICE_DROP_IF_NULL = frozenset(
+    {
+        "weeklyTrainingLoad",
+        "loadTunnelMin",
+        "loadTunnelMax",
+        "loadLevelTrend",
+    }
+)
+
+# Per-device fields dropped regardless of value. `deviceId` is redundant
+# with the surrounding map key (or context after a single-device collapse).
+# `primaryTrainingDevice` is intentionally NOT here — it carries signal on
+# multi-device users (`True` on the primary, `False` on secondaries), so
+# the collapse helper drops it only when collapsing to a single device
+# (where it's always `True` and therefore noise).
+_TRAINING_STATUS_DEVICE_DROP_ALWAYS = frozenset(
+    {
+        "deviceId",
+    }
+)
+
+# Per-device fields dropped on every `metricsTrainingLoadBalanceDTOMap`
+# entry regardless of value. Same `deviceId` redundancy as the
+# training-status sibling. `primaryTrainingDevice` is again handled
+# conditionally by the collapse helper.
+_TRAINING_LOAD_DEVICE_DROP_ALWAYS = frozenset(
+    {
+        "deviceId",
+    }
+)
+
+
+def _collapse_device_map(
+    value: Any,
+    per_device_drop_always: frozenset[str],
+    per_device_drop_if_null: frozenset[str] = frozenset(),
+) -> Any:
+    """Trim each device entry; collapse `{deviceId: {...}}` to the inner dict
+    when there's exactly one device.
+
+    Garmin nests device-keyed `{<deviceId>: {...}}` maps in two places
+    (`mostRecentTrainingStatus.latestTrainingStatusData` and
+    `mostRecentTrainingLoadBalance.metricsTrainingLoadBalanceDTOMap`).
+    On a single-device user (the common case) the outer key is meaningless
+    indirection — collapse to the inner dict so the LLM doesn't have to
+    pivot through an unknown numeric ID. On a multi-device user the map is
+    preserved so the LLM can still distinguish the watches.
+
+    Each per-device sub-dict has `per_device_drop_always` keys removed
+    unconditionally and `per_device_drop_if_null` keys removed only when
+    null. The conditional-null path lets a future Garmin shape change
+    that relocates real data into one of those keys flow through rather
+    than be silently swallowed.
+
+    `primaryTrainingDevice` is also dropped, but only on the single-device
+    collapse path — on a single watch it's always `True` and therefore
+    noise; on multi-device it's the only signal distinguishing primary
+    from secondaries (the surviving map key is opaque).
+
+    Non-dict inputs pass through unchanged so a missing map (already-null
+    upstream) doesn't crash.
+    """
+    if not isinstance(value, dict):
+        return value
+
+    def _clean(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        return {
+            k: v
+            for k, v in entry.items()
+            if k not in per_device_drop_always
+            and not (k in per_device_drop_if_null and v is None)
+        }
+
+    cleaned = {device_id: _clean(entry) for device_id, entry in value.items()}
+    if len(cleaned) == 1:
+        only = next(iter(cleaned.values()))
+        # On the single-device collapse path `primaryTrainingDevice` is
+        # always `True` and therefore noise; drop it. On multi-device
+        # (the else branch) we preserve it so the LLM can tell which
+        # watch is primary.
+        if isinstance(only, dict):
+            only = {k: v for k, v in only.items() if k != "primaryTrainingDevice"}
+        return only
+    return cleaned
+
+
+def trim_training_status(payload: Any) -> Any:
+    """Trim a `get_training_status` response.
+
+    Drops unconditionally:
+      - `mostRecentTrainingStatus.recordedDevices` (cross-tool repeat) and
+        `.showSelector` (UI hint).
+      - Per-device `deviceId` (redundant with map key / surrounding context).
+      - PII / `*Local` / image URLs at any depth via `_strip_pii`.
+
+    Drops only when null (so a future Garmin shape change that populates
+    these fields here flows through rather than being silently swallowed):
+      - Top-level `heatAltitudeAcclimationDTO` (always null on current
+        data; the populated copy lives at
+        `mostRecentVO2Max.heatAltitudeAcclimation`).
+      - Per-device `weeklyTrainingLoad`, `loadTunnelMin`, `loadTunnelMax`,
+        `loadLevelTrend` (always null at this layer; populated copies live
+        in `mostRecentTrainingLoadBalance`).
+
+    Drops only on the single-device collapse path:
+      - Per-device `primaryTrainingDevice` (always `True` on a single
+        watch; on multi-device it's the only signal distinguishing
+        primary from secondary, so it survives there).
+
+    Collapses single-device `{<deviceId>: {...}}` maps under
+    `latestTrainingStatusData` and `metricsTrainingLoadBalanceDTOMap` to
+    the inner dict — the outer numeric-ID indirection is meaningless on a
+    one-watch user. Multi-device maps are preserved.
+
+    Non-dict inputs and error stubs pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if "error" in payload:
+        return payload
+
+    trimmed: dict[str, Any] = {
+        k: v
+        for k, v in payload.items()
+        if not (k in _TRAINING_STATUS_TOP_LEVEL_DROP_IF_NULL and v is None)
+    }
+
+    status_block = trimmed.get("mostRecentTrainingStatus")
+    if isinstance(status_block, dict):
+        new_block: dict[str, Any] = {
+            k: v for k, v in status_block.items() if k not in _TRAINING_STATUS_BLOCK_DROP
+        }
+        latest = new_block.get("latestTrainingStatusData")
+        if isinstance(latest, dict):
+            new_block["latestTrainingStatusData"] = _collapse_device_map(
+                latest,
+                _TRAINING_STATUS_DEVICE_DROP_ALWAYS,
+                _TRAINING_STATUS_DEVICE_DROP_IF_NULL,
+            )
+        trimmed["mostRecentTrainingStatus"] = new_block
+
+    load_block = trimmed.get("mostRecentTrainingLoadBalance")
+    if isinstance(load_block, dict):
+        new_load = dict(load_block)
+        per_device = new_load.get("metricsTrainingLoadBalanceDTOMap")
+        if isinstance(per_device, dict):
+            new_load["metricsTrainingLoadBalanceDTOMap"] = _collapse_device_map(
+                per_device, _TRAINING_LOAD_DEVICE_DROP_ALWAYS
+            )
+        trimmed["mostRecentTrainingLoadBalance"] = new_load
+
+    return _strip_pii(trimmed)
+
+
+def trim_training_load(payload: Any) -> Any:
+    """Trim a `get_training_load` response down to load-balance fields only.
+
+    The upstream `get_training_status` payload contains
+    `mostRecentTrainingLoadBalance` alongside `mostRecentTrainingStatus`
+    and `mostRecentVO2Max`. The load tool re-uses the same upstream
+    fetcher (and cache) but scopes its response to the load-balance block
+    only — users wanting status or VO2 max should call the dedicated
+    tools rather than receive a 95%-duplicate copy here.
+
+    Keeps:
+      - `mostRecentTrainingLoadBalance` only, with the device-map collapse
+        applied. `deviceId` drops on every entry; `primaryTrainingDevice`
+        drops only on the single-device collapse path (signal-bearing
+        on multi-device users).
+
+    Drops:
+      - `mostRecentTrainingStatus`, `mostRecentVO2Max`,
+        `heatAltitudeAcclimationDTO`, `userId` (and any other top-level
+        sibling).
+      - PII / `*Local` / image URLs at any depth via `_strip_pii`.
+
+    Non-dict inputs and error stubs pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if "error" in payload:
+        return payload
+
+    load_block = payload.get("mostRecentTrainingLoadBalance")
+    if not isinstance(load_block, dict):
+        return {}
+
+    new_load = dict(load_block)
+    per_device = new_load.get("metricsTrainingLoadBalanceDTOMap")
+    if isinstance(per_device, dict):
+        new_load["metricsTrainingLoadBalanceDTOMap"] = _collapse_device_map(
+            per_device, _TRAINING_LOAD_DEVICE_DROP_ALWAYS
+        )
+
+    return _strip_pii({"mostRecentTrainingLoadBalance": new_load})
+
+
+# Always-drop noise from a training-readiness reading. `timestampLocal`
+# is the lowercase parallel of `timestamp` — it slips past the cross-cutting
+# `_strip_pii` suffix predicate (which matches `TimestampLocal` /
+# `TimeLocal` case-sensitively) so we drop it explicitly here.
+_TRAINING_READINESS_DROP = frozenset(
+    {
+        "deviceId",
+        "feedbackLong",
+        "validSleep",
+        "inputContext",
+        "primaryActivityTracker",
+        "timestampLocal",
+    }
+)
+
+# Six parallel `<factor>FactorPercent` / `<factor>FactorFeedback` pairs
+# Garmin emits on a readiness reading. Each pair collapses into a single
+# `{score, qualifier}` envelope inside the `factors` block.
+_TRAINING_READINESS_FACTOR_NAMES = (
+    "sleepScore",
+    "recoveryTime",
+    "acwr",
+    "stressHistory",
+    "hrv",
+    "sleepHistory",
+)
+
+# Public-name → (Percent-key, Feedback-key) for the factor envelope. The
+# public name drops the `Score` suffix on `sleepScore` so the envelope
+# label is the bare factor (`sleep`, `recovery`, …). The `recovery` key
+# also lines up with the surviving raw `recoveryTime_min` field.
+_TRAINING_READINESS_FACTORS = {
+    "sleep": ("sleepScoreFactorPercent", "sleepScoreFactorFeedback"),
+    "recovery": ("recoveryTimeFactorPercent", "recoveryTimeFactorFeedback"),
+    "acwr": ("acwrFactorPercent", "acwrFactorFeedback"),
+    "stress": ("stressHistoryFactorPercent", "stressHistoryFactorFeedback"),
+    "hrv": ("hrvFactorPercent", "hrvFactorFeedback"),
+    "sleepHistory": ("sleepHistoryFactorPercent", "sleepHistoryFactorFeedback"),
+}
+
+
+def _trim_readiness_reading(reading: Any) -> Any:
+    """Trim a single readiness reading dict.
+
+    - Renames `recoveryTime` (minutes) to `recoveryTime_min` for unit clarity.
+    - Collapses the six parallel `<factor>FactorPercent`/`<factor>FactorFeedback`
+      pairs into a `factors` block of `{score, qualifier}` envelopes.
+    - Drops `recoveryTimeChangePhrase` only when null (the common case);
+      a non-null phrase is a meaningful narrative signal.
+    - Drops `_TRAINING_READINESS_DROP` keys + every consumed factor field.
+
+    Non-dict inputs and error stubs pass through unchanged.
+    """
+    if not isinstance(reading, dict):
+        return reading
+    if "error" in reading:
+        return reading
+
+    drop = set(_TRAINING_READINESS_DROP)
+    for percent_key, feedback_key in _TRAINING_READINESS_FACTORS.values():
+        drop.add(percent_key)
+        drop.add(feedback_key)
+    if reading.get("recoveryTimeChangePhrase") is None:
+        drop.add("recoveryTimeChangePhrase")
+
+    out: dict[str, Any] = {k: v for k, v in reading.items() if k not in drop}
+
+    if "recoveryTime" in out:
+        out["recoveryTime_min"] = out.pop("recoveryTime")
+
+    factors: dict[str, Any] = {}
+    for label, (percent_key, feedback_key) in _TRAINING_READINESS_FACTORS.items():
+        if percent_key in reading or feedback_key in reading:
+            factors[label] = {
+                "score": reading.get(percent_key),
+                "qualifier": reading.get(feedback_key),
+            }
+    if factors:
+        out["factors"] = factors
+
+    return out
+
+
+def trim_training_readiness(payload: Any, *, most_recent_only: bool = True) -> Any:
+    """Trim a `get_training_readiness` response.
+
+    The upstream returns a list of one-or-more readings per day (Garmin
+    logs a check at wake-up plus updates on real-time variable changes).
+    By default the trim returns just the most-recent reading as a single
+    dict — the LLM almost always wants "what's the latest" rather than
+    "show me every check today". Pass `most_recent_only=False` to keep
+    the full list (each entry trimmed); the verbose tool path bypasses
+    this helper entirely and returns the un-modified upstream.
+
+    Per-reading trim:
+      - Renames `recoveryTime` (minutes) to `recoveryTime_min` for unit
+        clarity.
+      - Collapses six parallel `<factor>FactorPercent`/`<factor>FactorFeedback`
+        pairs into a `factors` block of `{score, qualifier}` envelopes,
+        keyed by `sleep` / `recovery` / `acwr` / `stress` / `hrv` /
+        `sleepHistory`.
+      - Drops `deviceId`, `feedbackLong` (the verbose code; `feedbackShort`
+        is kept), `validSleep` (always true when a score exists),
+        `inputContext`, `primaryActivityTracker`, `timestampLocal` (lowercase
+        `Local` parallel that escapes the case-sensitive `_strip_pii`
+        suffix predicate).
+      - Drops `recoveryTimeChangePhrase` when null; a non-null phrase
+        survives.
+      - PII (`userProfilePK`) drops via `_strip_pii` at the final pass.
+
+    Non-list / non-dict inputs and error stubs pass through unchanged.
+    """
+    if isinstance(payload, dict):
+        return _strip_pii(_trim_readiness_reading(payload))
+    if not isinstance(payload, list):
+        return payload
+
+    if most_recent_only:
+        if not payload:
+            return {}
+        # Garmin emits readings newest-first on the live endpoint, so the
+        # first element is the most-recent reading. We trust that ordering
+        # rather than re-sorting on `timestamp` — keeps behaviour
+        # deterministic against an empty / malformed timestamp. Callers
+        # who want to verify ordering or inspect older readings should
+        # pass `verbose=True` to get the un-modified upstream list.
+        return _strip_pii(_trim_readiness_reading(payload[0]))
+
+    return [_strip_pii(_trim_readiness_reading(r)) for r in payload]
+
+
+# Per-discipline noise dropped from `mostRecentVO2Max`. `fitnessAge` /
+# `fitnessAgeDescription` are perpetually null on Kamil's data and add
+# byte tax with no analytical signal.
+_VO2_MAX_DISCIPLINE_DROP = frozenset(
+    {
+        "fitnessAge",
+        "fitnessAgeDescription",
+    }
+)
+
+
+def _trim_vo2_discipline(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {k: v for k, v in value.items() if k not in _VO2_MAX_DISCIPLINE_DROP}
+
+
+def trim_vo2_max(payload: Any) -> Any:
+    """Extract & trim the VO2 max sub-block from a training-status payload.
+
+    The legacy `get_max_metrics` Garmin endpoint returns `[]` for users
+    on newer Connect versions — the data has migrated under
+    `mostRecentVO2Max` on `get_training_status`. This helper takes the
+    full training-status payload and emits a tidy
+    `{calendarDate, generic, cycling}` shape:
+
+      - `generic.vo2MaxValue` (integer for narration) and
+        `vo2MaxPreciseValue` (decimal for trend analysis) both survive.
+      - `fitnessAge` / `fitnessAgeDescription` drop on every discipline
+        (perpetually null on the data we've seen).
+      - `heatAltitudeAcclimation` is dropped — it's a separate concern
+        and surfaces via `get_training_status` for users who need it.
+      - `userId` drops via `_strip_pii`.
+
+    Non-dict inputs and error stubs pass through unchanged. When
+    `mostRecentVO2Max` is null or the inner `generic` block is null, an
+    empty `{}` is returned cleanly.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if "error" in payload:
+        return payload
+
+    block = payload.get("mostRecentVO2Max")
+    if not isinstance(block, dict):
+        return {}
+
+    generic = _trim_vo2_discipline(block.get("generic"))
+    cycling = _trim_vo2_discipline(block.get("cycling"))
+
+    if not isinstance(generic, dict) and not isinstance(cycling, dict):
+        return {}
+
+    out: dict[str, Any] = {}
+    if isinstance(generic, dict):
+        # `calendarDate` lives inside `generic` on the live payload — lift
+        # it to the top so the consumer sees it without traversing.
+        if "calendarDate" in generic:
+            out["calendarDate"] = generic["calendarDate"]
+        out["generic"] = {k: v for k, v in generic.items() if k != "calendarDate"}
+    if isinstance(cycling, dict):
+        out["cycling"] = {k: v for k, v in cycling.items() if k != "calendarDate"}
+    elif "cycling" in block:
+        out["cycling"] = block["cycling"]  # null passes through explicitly
+
+    return _strip_pii(out)
