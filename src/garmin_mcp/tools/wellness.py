@@ -77,10 +77,12 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         analytically useful summary: day-level charged/drained totals, the
         compressed transition `bodyBatteryValuesArray` (the 6-12 inflection
         points), per-activity impact events (sleep / exercise / recovery
-        with bodyBatteryImpact), and the short-form dynamic-feedback events.
-        Descriptor metadata, `userProfilePK`, `bodyBatteryVersion`, verbose
-        `feedbackLongType` strings, and per-event device/audit metadata
-        (`deviceId`, `eventUpdateTimeGmt`, `timezoneOffset`) are dropped.
+        with bodyBatteryImpact), and the dynamic-feedback events (with
+        both short and long feedback codes — the long form sometimes
+        carries narrative context not derivable from the short code).
+        Descriptor metadata, `userProfilePK`, `bodyBatteryVersion`, and
+        per-event device/audit metadata (`deviceId`, `eventUpdateTimeGmt`,
+        `timezoneOffset`) are dropped.
 
         Pass verbose=True to get the un-modified upstream response. The
         cache stores the full upstream regardless, so a later verbose=True

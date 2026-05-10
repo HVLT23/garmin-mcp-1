@@ -24,8 +24,9 @@ chart hints + descriptor lists.
 dict per day for a date range). Each per-day dict is filtered with an
 allowlist that keeps the day summary, the compressed transition
 `bodyBatteryValuesArray`, the activity-tied impact events, and the
-short-form dynamic feedback. Descriptor metadata, `userProfilePK`,
-`bodyBatteryVersion`, and the verbose `feedbackLongType` strings are
+dynamic feedback events (both short and long forms — the long form is
+sometimes a multi-tag composite that's the densest narrative signal).
+Descriptor metadata, `userProfilePK`, and `bodyBatteryVersion` are
 dropped.
 
 All strategies treat non-dict input (e.g. error stubs) as a pass-through.
@@ -377,14 +378,18 @@ _BB_ACTIVITY_EVENT_KEEP = frozenset(
 
 # Fields kept inside each dynamic-feedback event (single-event objects on
 # `bodyBatteryDynamicFeedbackEvent` and `endOfDayBodyBatteryDynamicFeedbackEvent`).
-# `feedbackLongType` is dropped — it duplicates `feedbackShortType` with a
-# verbose suffix (e.g. SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW)
-# that's an internal feedback code, not an LLM-readable summary.
+# `feedbackLongType` is kept: in some events it really is a verbose suffix
+# of `feedbackShortType` (e.g. TYPICAL → WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY),
+# but in others it's a multi-tag composite like
+# SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW that captures
+# narrative context not derivable from the kept shortType. Bytes saved
+# would be one string per event (~2/day) — analytical value clearly wins.
 _BB_DYNAMIC_FEEDBACK_KEEP = frozenset(
     {
         "eventTimestampGmt",
         "bodyBatteryLevel",
         "feedbackShortType",
+        "feedbackLongType",
     }
 )
 
@@ -435,12 +440,12 @@ def trim_body_battery(payload: Any) -> Any:
     - `bodyBatteryActivityEvent` — list of activity-tied impact entries
       (sleep, exercise, recovery, etc. with bodyBatteryImpact)
     - `bodyBatteryDynamicFeedbackEvent` / `endOfDayBodyBatteryDynamicFeedbackEvent` —
-      single-event objects with HIGH/MED/LOW level + short feedback type
+      single-event objects with the level + short and long feedback codes
 
     All survive the trim. Algorithm internals (descriptor metadata,
-    `bodyBatteryVersion`, `userProfilePK`), verbose feedback strings
-    (`feedbackLongType`), and per-event device/audit metadata
-    (`deviceId`, `eventUpdateTimeGmt`, `timezoneOffset`) are dropped.
+    `bodyBatteryVersion`, `userProfilePK`) and per-event device/audit
+    metadata (`deviceId`, `eventUpdateTimeGmt`, `timezoneOffset`) are
+    dropped.
 
     Operates over a list (the normal Garmin response shape) by mapping
     over each entry. Single-dict inputs are also accepted defensively.

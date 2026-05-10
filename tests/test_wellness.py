@@ -956,11 +956,16 @@ def test_trim_body_battery_drops_activity_event_device_metadata() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_trim_body_battery_dynamic_feedback_drops_long_type() -> None:
-    """The verbose `feedbackLongType` is duplicate-with-suffix of `feedbackShortType`.
+def test_trim_body_battery_dynamic_feedback_keeps_both_short_and_long_type() -> None:
+    """Both `feedbackShortType` and `feedbackLongType` are kept.
 
-    Drop it; keep only the timestamp, level (HIGH/MED/LOW/WITHIN_TYPICAL_RANGE),
-    and short type.
+    The longType is sometimes a verbose suffix of the shortType (e.g.
+    TYPICAL → WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY) but in other
+    events it's a multi-tag composite carrying narrative context not
+    derivable from the shortType — see the end-of-day event below where
+    shortType is "TYPICAL" (a single enum) but longType is
+    "SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW" (the densest
+    "why was BB low" signal). Bytes per event are negligible.
     """
     full = load_fixture("body_battery_payload_full")
     trimmed = trim_body_battery(full)
@@ -971,16 +976,16 @@ def test_trim_body_battery_dynamic_feedback_drops_long_type() -> None:
         "eventTimestampGmt": 1746788400000,
         "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
         "feedbackShortType": "TYPICAL",
+        "feedbackLongType": "WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY",
     }
-    assert "feedbackLongType" not in feedback
 
     end_of_day = entry["endOfDayBodyBatteryDynamicFeedbackEvent"]
     assert end_of_day == {
         "eventTimestampGmt": 1746828000000,
         "bodyBatteryLevel": "WITHIN_TYPICAL_RANGE",
         "feedbackShortType": "TYPICAL",
+        "feedbackLongType": "SLEEP_PREPARATION_STRESSFUL_AND_EXERCISE_AND_BB_LOW",
     }
-    assert "feedbackLongType" not in end_of_day
 
 
 # ---------------------------------------------------------------------------
@@ -1078,7 +1083,12 @@ def test_get_body_battery_default_payload_is_trimmed(mcp_with_tools, mock_garmin
     assert len(entry["bodyBatteryValuesArray"]) == 6
     assert len(entry["bodyBatteryActivityEvent"]) == 3
     assert entry["bodyBatteryDynamicFeedbackEvent"]["feedbackShortType"] == "TYPICAL"
-    assert "feedbackLongType" not in entry["bodyBatteryDynamicFeedbackEvent"]
+    # Both short and long feedback codes survive — the long form sometimes
+    # carries multi-tag narrative context not derivable from the short.
+    assert (
+        entry["bodyBatteryDynamicFeedbackEvent"]["feedbackLongType"]
+        == "WITHIN_TYPICAL_RANGE_FOR_THIS_TIME_OF_DAY"
+    )
 
 
 def test_get_body_battery_default_shrinks_fixture_payload(mcp_with_tools, mock_garmin) -> None:
@@ -1104,16 +1114,16 @@ def test_get_body_battery_default_shrinks_fixture_payload(mcp_with_tools, mock_g
 def test_get_body_battery_realistic_density_shrinks_payload(
     mcp_with_tools, mock_garmin
 ) -> None:
-    """A realistic 7-day range shrinks meaningfully (~1.5x).
+    """A realistic 7-day range shrinks meaningfully (~1.3x).
 
     The body-battery endpoint, unlike stress, does NOT bundle a 480-entry
     per-3-min sample stream — Garmin returns only the compressed 6-12
     transition list. So the trim's savings come from per-day repeated
     metadata (descriptor list, userProfilePK, bodyBatteryVersion,
-    feedbackLongType strings, per-event device/audit fields) rather than
-    a stream we can collapse. Floor of 1.4x catches a regression that
-    disables trimming entirely (ratio would be ~1.0) without falsely
-    flagging the modest reduction the actual upstream allows.
+    per-event device/audit fields) rather than a stream we can collapse.
+    Floor of 1.3x catches a regression that disables trimming entirely
+    (ratio would be ~1.0) without falsely flagging the modest reduction
+    the actual upstream allows.
     """
     HOUR_MS = 3_600_000
     full = []
@@ -1176,9 +1186,9 @@ def test_get_body_battery_realistic_density_shrinks_payload(
 
     upstream_size = len(json.dumps(full))
     trimmed_size = len(json.dumps(result))
-    assert trimmed_size * 1.4 < upstream_size, (
+    assert trimmed_size * 1.3 < upstream_size, (
         f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
-        "expected at least 1.4x reduction on a 7-day realistic payload"
+        "expected at least 1.3x reduction on a 7-day realistic payload"
     )
 
 
@@ -1193,10 +1203,10 @@ def test_get_body_battery_verbose_returns_unmodified_upstream(
     result = fn(start_date="2026-05-09", verbose=True)
 
     assert result == full
-    # The verbose fields are present in the upstream copy.
+    # Fields dropped by the default trim are present in the verbose copy.
     assert "userProfilePK" in result[0]
     assert "bodyBatteryValueDescriptorDTOList" in result[0]
-    assert "feedbackLongType" in result[0]["bodyBatteryDynamicFeedbackEvent"]
+    assert "bodyBatteryVersion" in result[0]
 
 
 def test_get_body_battery_cache_persists_full_upstream(
