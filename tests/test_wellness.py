@@ -2057,21 +2057,69 @@ def test_trim_daily_summary_keeps_abnormal_hr_alerts_when_populated() -> None:
     assert result["abnormalHeartRateAlertsCount"] == 2
 
 
-def test_trim_daily_summary_keys_subset_of_expected() -> None:
-    """Allowlist canary: trimmed output's keys stay within the expected set.
+def test_trim_daily_summary_keeps_abnormal_hr_alerts_zero_boundary() -> None:
+    """Boundary: `0` (checked, no alerts) is a meaningful signal — keep.
+
+    Pins the `is None` predicate against a future drive-by `if not value:`
+    regression that would falsy-collapse `0` into the drop branch and lose
+    the "monitoring ran and reported zero alerts" signal.
+    """
+    full = load_fixture("daily_summary_payload_full")
+    full = {**full, "abnormalHeartRateAlertsCount": 0}
+    result = trim_daily_summary(full)
+    assert result["abnormalHeartRateAlertsCount"] == 0
+
+
+# Keys that are in `_EXPECTED_DAILY_SUMMARY_KEYS` but may legitimately be
+# absent from a trimmed result — the conditional drops fire when the
+# upstream readings are null. Excluded from the "required keys present"
+# direction of the bidirectional canary so a no-Spo2 / no-abnormal-HR day
+# doesn't trip the silent-loss check. The Spo2 conditional + abnormal-HR
+# conditional both have their own dedicated tests, so removing them from
+# the required-set doesn't weaken coverage.
+_DAILY_SUMMARY_CONDITIONAL_KEYS = frozenset(
+    {
+        "averageSpo2",
+        "lowestSpo2",
+        "latestSpo2",
+        "latestSpo2ReadingTimeGmt",
+        "latestSpo2ReadingTimeLocal",
+        "abnormalHeartRateAlertsCount",
+    }
+)
+
+
+def test_trim_daily_summary_keys_match_expected_bidirectional() -> None:
+    """Bidirectional canary: trimmed keys are *exactly* the expected set
+    (modulo the conditionally-dropped fields).
 
     The trim uses a denylist (so additive Garmin fields auto-pass-through),
-    but that means a future *bloat* field would leak silently. This canary
-    asserts every emitted key is in `_EXPECTED_DAILY_SUMMARY_KEYS` — adding
-    a new bloat field to the upstream forces an explicit decision (extend
-    the canary or extend the denylist).
+    but that means a future *bloat* field would leak silently AND a future
+    over-aggressive denylist extension would silently drop a should-keep
+    field. Both directions:
+
+      - subset check: every emitted key is in `_EXPECTED_DAILY_SUMMARY_KEYS`
+        — catches additive bloat (a new upstream key survives the trim).
+      - superset check: every required key is present in the result —
+        catches silent loss (the trim accidentally drops, say,
+        `restingHeartRate`). The conditional Spo2 + abnormal-HR fields are
+        excluded from this direction since they're absent on the no-Spo2
+        / no-alert fixture by design.
     """
     full = load_fixture("daily_summary_payload_full")
     result = trim_daily_summary(full)
+
     unexpected = set(result.keys()) - _EXPECTED_DAILY_SUMMARY_KEYS
     assert not unexpected, (
         f"trim emitted unexpected top-level keys: {sorted(unexpected)}; "
         "either add to _EXPECTED_DAILY_SUMMARY_KEYS or add to the denylist"
+    )
+
+    required = _EXPECTED_DAILY_SUMMARY_KEYS - _DAILY_SUMMARY_CONDITIONAL_KEYS
+    missing = required - set(result.keys())
+    assert not missing, (
+        f"trim silently dropped required keys: {sorted(missing)}; "
+        "the denylist likely over-extended — keep these in the trimmed output"
     )
 
 
