@@ -182,15 +182,22 @@ def trim_sleep(sleep: Any) -> Any:
     return trimmed
 
 
-def trim_hrv(hrv: Any) -> Any:
-    """Strip the per-5-min `hrvReadings` array from an HRV response.
+_HRV_DROP = frozenset({"hrvReadings", "userProfilePk"})
 
-    Keeps the summary block (lastNightAvg, weeklyAvg, status, feedbackPhrase…).
+
+def trim_hrv(hrv: Any) -> Any:
+    """Strip the per-5-min `hrvReadings` array (and `userProfilePk`) from an HRV response.
+
+    Keeps the summary block (lastNightAvg, weeklyAvg, status, feedbackPhrase,
+    baseline…) and the surrounding sleep-window timestamps. `userProfilePk`
+    is dropped for parity with `trim_stress` / `trim_body_battery`, which
+    already strip the equivalent identifier; the aggregate tool consumes
+    the same trim and didn't carry the field in its expected output.
     Non-dict inputs pass through unchanged.
     """
     if not isinstance(hrv, dict):
         return hrv
-    return {k: v for k, v in hrv.items() if k != "hrvReadings"}
+    return {k: v for k, v in hrv.items() if k not in _HRV_DROP}
 
 
 # Always-drop noise: PII / chart-layout hints / descriptor metadata that

@@ -10,7 +10,13 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WELLNESS, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
-from garmin_mcp.tools._trimmers import trim_body_battery, trim_sleep, trim_steps, trim_stress
+from garmin_mcp.tools._trimmers import (
+    trim_body_battery,
+    trim_hrv,
+    trim_sleep,
+    trim_steps,
+    trim_stress,
+)
 
 ClientFactory = Callable[[], Garmin]
 
@@ -48,14 +54,35 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         full = _fetch_sleep(coerce_date(date))
         return full if verbose else trim_sleep(full)
 
+    # Cached fetcher for the full upstream HRV payload. Same pattern as
+    # `_fetch_sleep` / `_fetch_stress` — caching happens before trimming so
+    # a verbose=True call after a verbose=False call hits the cache rather
+    # than re-fetching.
+    @cached(ttl=TTL_WELLNESS)
+    def _fetch_hrv(date: str) -> dict[str, Any]:
+        return client_factory().get_hrv_data(date) or {}
+
     @mcp.tool()
     @audited
     @safe_call
-    @cached(ttl=TTL_WELLNESS)
-    def get_hrv(date: str | None = None) -> dict[str, Any]:
-        """Heart-rate variability summary for a given ISO date. Defaults to today."""
-        result = client_factory().get_hrv_data(coerce_date(date))
-        return result or {}
+    def get_hrv(date: str | None = None, verbose: bool = False) -> dict[str, Any]:
+        """Heart-rate variability summary for a given ISO date. Defaults to today.
+
+        By default (verbose=False) the response is trimmed to the analytically
+        useful summary: `hrvSummary` (status, lastNightAvg, weeklyAvg,
+        lastNight5MinHigh, baseline, feedbackPhrase) plus the surrounding
+        sleep-window timestamps. The ~60 per-5-min entries in `hrvReadings`
+        and `userProfilePk` are dropped — together they account for ~90% of
+        the upstream payload (measured ~10x reduction on Kamil's
+        2026-05-09 data: ~7200 → ~700 chars), but the LLM reasons about
+        recovery from the summary, not the raw waveform.
+
+        Pass verbose=True to get the un-modified upstream response for raw
+        waveform access. The cache stores the full upstream regardless, so
+        a later verbose=True call hits the cache rather than re-fetching.
+        """
+        full = _fetch_hrv(coerce_date(date))
+        return full if verbose else trim_hrv(full)
 
     # Cached fetcher for the full upstream body-battery payload. Same
     # pattern as `_fetch_sleep` / `_fetch_stress` — caching happens before

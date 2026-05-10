@@ -7,6 +7,7 @@ import json
 from garmin_mcp.tools._trimmers import (
     _compute_stress_buckets,
     trim_body_battery,
+    trim_hrv,
     trim_sleep,
     trim_steps,
     trim_stress,
@@ -1640,5 +1641,184 @@ def test_get_steps_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> N
     mock_garmin.get_steps_data.side_effect = GarminConnectAuthenticationError("expired")
 
     fn = get_tool(mcp_with_tools, "get_steps")
+    result = fn(date="2026-05-09")
+    assert result["error"] == "auth_expired"
+
+
+# ---------------------------------------------------------------------------
+# trim_hrv helper — drop list + passthroughs
+# ---------------------------------------------------------------------------
+
+
+# Top-level keys allowed in the trimmed response. Acts as a canary: a future
+# Garmin field appearing at the top level (or one of these keys disappearing)
+# fails this test fast so we revisit the trim instead of silently shipping
+# the new field.
+_EXPECTED_HRV_KEYS = {
+    "hrvSummary",
+    "startTimestampGMT",
+    "startTimestampLocal",
+    "endTimestampGMT",
+    "endTimestampLocal",
+    "sleepStartTimestampGMT",
+    "sleepStartTimestampLocal",
+    "sleepEndTimestampGMT",
+    "sleepEndTimestampLocal",
+}
+
+
+def test_trim_hrv_drops_hrv_readings() -> None:
+    full = load_fixture("hrv_payload_full")
+    trimmed = trim_hrv(full)
+    # Intentional, not oversight — `hrvReadings` is ~90% of the payload.
+    assert "hrvReadings" not in trimmed
+
+
+def test_trim_hrv_drops_user_profile_pk() -> None:
+    full = load_fixture("hrv_payload_full")
+    trimmed = trim_hrv(full)
+    # Intentional, not oversight — parity with trim_stress / trim_body_battery.
+    assert "userProfilePk" not in trimmed
+
+
+def test_trim_hrv_keys_subset_of_expected() -> None:
+    """Allowlist canary: every surviving top-level key is in the expected set."""
+    full = load_fixture("hrv_payload_full")
+    trimmed = trim_hrv(full)
+    unexpected = set(trimmed.keys()) - _EXPECTED_HRV_KEYS
+    assert not unexpected, (
+        f"unexpected top-level keys in trimmed HRV payload: {unexpected}. "
+        "Either add to _EXPECTED_HRV_KEYS or extend trim_hrv's drop list."
+    )
+
+
+def test_trim_hrv_keeps_summary_block_untouched() -> None:
+    """`hrvSummary` is preserved byte-equivalent to the upstream fixture."""
+    full = load_fixture("hrv_payload_full")
+    trimmed = trim_hrv(full)
+    assert trimmed["hrvSummary"] == full["hrvSummary"]
+
+
+def test_trim_hrv_keeps_sleep_window_timestamps() -> None:
+    full = load_fixture("hrv_payload_full")
+    trimmed = trim_hrv(full)
+    for kept in (
+        "startTimestampGMT",
+        "endTimestampGMT",
+        "sleepStartTimestampGMT",
+        "sleepEndTimestampGMT",
+    ):
+        assert trimmed[kept] == full[kept]
+
+
+def test_trim_hrv_passes_through_non_dict_and_empty() -> None:
+    """None / non-dict inputs pass through unchanged; empty dict stays empty."""
+    assert trim_hrv(None) is None
+    assert trim_hrv("oops") == "oops"
+    assert trim_hrv([]) == []
+    assert trim_hrv({}) == {}
+
+
+def test_trim_hrv_passes_through_error_stub() -> None:
+    """Error stubs from safe_call should NOT be swallowed by the trim.
+
+    The current implementation is a pure denylist (drops `hrvReadings` /
+    `userProfilePk`) so a `{"error": ...}` stub passes through structurally
+    intact — there's no allowlist to filter the diagnostic out.
+    """
+    stub = {"error": "fetch_failed", "exception": "RuntimeError: boom"}
+    assert trim_hrv(stub) == stub
+
+
+# ---------------------------------------------------------------------------
+# get_hrv tool — verbose flag, cache reuse, error passthrough
+# ---------------------------------------------------------------------------
+
+
+def test_get_hrv_default_payload_is_trimmed(mcp_with_tools, mock_garmin) -> None:
+    """Default call drops hrvReadings + userProfilePk and shrinks the payload."""
+    full = load_fixture("hrv_payload_full")
+    mock_garmin.get_hrv_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_hrv")
+    result = fn(date="2026-05-09")
+
+    assert "hrvReadings" not in result
+    assert "userProfilePk" not in result
+    # Surviving keys stay within the allowlist canary.
+    assert set(result.keys()) <= _EXPECTED_HRV_KEYS
+    # hrvSummary survives byte-equivalent.
+    assert result["hrvSummary"] == full["hrvSummary"]
+
+
+def test_get_hrv_default_reduction_ratio_floor(mcp_with_tools, mock_garmin) -> None:
+    """Trimmed response is at least 5x smaller than the upstream fixture.
+
+    Measured ~10x on Kamil's 2026-05-09 live data (~7200 → ~700 chars).
+    Floor of 5x catches a regression that disables the trim or accidentally
+    keeps the readings array.
+    """
+    full = load_fixture("hrv_payload_full")
+    mock_garmin.get_hrv_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_hrv")
+    trimmed = fn(date="2026-05-09")
+
+    upstream_size = len(json.dumps(full))
+    trimmed_size = len(json.dumps(trimmed))
+    assert trimmed_size * 5 <= upstream_size, (
+        f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
+        "expected at least 5x reduction"
+    )
+
+
+def test_get_hrv_verbose_returns_unmodified_upstream(mcp_with_tools, mock_garmin) -> None:
+    """verbose=True returns a value-equal copy of the full upstream payload."""
+    full = load_fixture("hrv_payload_full")
+    mock_garmin.get_hrv_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_hrv")
+    result = fn(date="2026-05-09", verbose=True)
+
+    assert result == full
+    assert "hrvReadings" in result
+    assert "userProfilePk" in result
+
+
+def test_get_hrv_cache_persists_full_upstream(mcp_with_tools, mock_garmin, monkeypatch) -> None:
+    """A verbose=True call after a verbose=False call hits the cache.
+
+    The trim runs *outside* the cache layer, so cached entries always store
+    the full upstream and a later verbose=True call does not re-fetch from
+    Garmin.
+    """
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("hrv_payload_full")
+    mock_garmin.get_hrv_data.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_hrv")
+
+    trimmed = fn(date="2026-05-09")
+    verbose = fn(date="2026-05-09", verbose=True)
+
+    assert mock_garmin.get_hrv_data.call_count == 1
+    assert verbose == full
+    assert "hrvReadings" not in trimmed
+    assert "hrvReadings" in verbose
+
+    cache.clear_all()
+
+
+def test_get_hrv_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> None:
+    """A Garmin SDK exception bubbles into a structured error via safe_call."""
+    from garminconnect import GarminConnectAuthenticationError
+
+    mock_garmin.get_hrv_data.side_effect = GarminConnectAuthenticationError("expired")
+
+    fn = get_tool(mcp_with_tools, "get_hrv")
     result = fn(date="2026-05-09")
     assert result["error"] == "auth_expired"
