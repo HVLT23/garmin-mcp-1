@@ -7,7 +7,6 @@ import json
 from garmin_mcp.tools._trimmers import trim_sleep
 from tests.conftest import get_tool, load_fixture
 
-
 # ---------------------------------------------------------------------------
 # trim_sleep helper — top-level drop / keep
 # ---------------------------------------------------------------------------

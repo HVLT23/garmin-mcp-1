@@ -7,11 +7,11 @@ import json
 
 import pytest
 
+from garmin_mcp.tools._trimmers import trim_hrv, trim_sleep_streams
 from garmin_mcp.tools.aggregate import (
     _parse_activity_start,
     prior_night_date,
 )
-from garmin_mcp.tools._trimmers import trim_hrv, trim_sleep_streams
 from tests.conftest import get_tool, load_fixture
 
 
