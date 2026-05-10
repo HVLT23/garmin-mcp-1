@@ -1,0 +1,43 @@
+{
+  "activityId": 22817757923,
+  "lapDTOs": [
+    {
+      "startTimeGMT": "2026-05-09T07:46:00.0",
+      "distance": 0.0,
+      "duration": 7274.338,
+      "movingDuration": 3780.313,
+      "elapsedDuration": 7274.338,
+      "averageSpeed": 0.0,
+      "averageMovingSpeed": 0.0,
+      "calories": 713.0,
+      "bmrCalories": 197.0,
+      "averageHR": 108.0,
+      "maxHR": 142.0,
+      "trainingEffect": 1.2999999523162842,
+      "waterEstimated": 1260.0,
+      "lapIndex": 1,
+      "lengthDTOs": [],
+      "connectIQMeasurement": []
+    }
+  ],
+  "eventDTOs": [
+    {
+      "startTimeGMT": "2026-05-09T07:45:59.0",
+      "startTimeGMTDoubleValue": 1778312759000.0,
+      "sectionTypeDTO": {
+        "id": 4,
+        "key": "timerTrigger",
+        "sectionTypeKey": "TIMER_TRIGGER"
+      }
+    },
+    {
+      "startTimeGMT": "2026-05-09T07:46:00.0",
+      "startTimeGMTDoubleValue": 1778312760000.0,
+      "sectionTypeDTO": {
+        "id": 4,
+        "key": "timerTrigger",
+        "sectionTypeKey": "TIMER_TRIGGER"
+      }
+    }
+  ]
+}

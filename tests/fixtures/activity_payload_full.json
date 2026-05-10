@@ -1,0 +1,118 @@
+{
+  "activityId": 22817757923,
+  "activityUUID": {
+    "uuid": "33333333-3333-3333-3333-333333333333"
+  },
+  "activityName": "Strength",
+  "userProfileId": 999999,
+  "isMultiSportParent": false,
+  "activityTypeDTO": {
+    "typeId": 13,
+    "typeKey": "strength_training",
+    "parentTypeId": 29,
+    "isHidden": false,
+    "restricted": false,
+    "trimmable": false
+  },
+  "eventTypeDTO": {
+    "typeId": 9,
+    "typeKey": "uncategorized",
+    "sortOrder": 10
+  },
+  "accessControlRuleDTO": {
+    "typeId": 3,
+    "typeKey": "subscribers"
+  },
+  "timeZoneUnitDTO": {
+    "unitId": 124,
+    "unitKey": "Europe/Paris",
+    "factor": 0.0,
+    "timeZone": "Europe/Paris"
+  },
+  "metadataDTO": {
+    "isOriginal": true,
+    "deviceApplicationInstallationId": 1008741,
+    "agentApplicationInstallationId": null,
+    "agentString": null,
+    "fileFormat": {
+      "formatId": 7,
+      "formatKey": "fit"
+    },
+    "associatedCourseId": null,
+    "lastUpdateDate": "2026-05-09T09:47:57.0",
+    "uploadedDate": "2026-05-09T09:47:57.0",
+    "videoUrl": null,
+    "hasPolyline": false,
+    "hasChartData": true,
+    "hasHrTimeInZones": true,
+    "hasPowerTimeInZones": false,
+    "userInfoDto": {
+      "userProfilePk": 999999,
+      "displayname": "11111111-1111-1111-1111-111111111111",
+      "fullname": "Test User",
+      "profileImageUrlLarge": "https://s3.amazonaws.com/garmin-connect-prod/profile_images/22222222-2222-2222-2222-222222222222-prof.png",
+      "profileImageUrlMedium": "https://s3.amazonaws.com/garmin-connect-prod/profile_images/22222222-2222-2222-2222-222222222222-prfr.png",
+      "profileImageUrlSmall": "https://s3.amazonaws.com/garmin-connect-prod/profile_images/22222222-2222-2222-2222-222222222222-prth.png",
+      "userPro": false
+    },
+    "childIds": [],
+    "childActivityTypes": [],
+    "sensors": null,
+    "activityImages": [],
+    "manufacturer": "GARMIN",
+    "diveNumber": null,
+    "lapCount": 1,
+    "associatedWorkoutId": null,
+    "isAtpActivity": null,
+    "deviceMetaDataDTO": {
+      "deviceId": "3458499233",
+      "deviceTypePk": 37073,
+      "deviceVersionPk": 1008741
+    },
+    "hasIntensityIntervals": false,
+    "hasSplits": false,
+    "eBikeMaxAssistModes": null,
+    "eBikeBatteryUsage": null,
+    "eBikeBatteryRemaining": null,
+    "eBikeAssistModeInfoDTOList": null,
+    "hasRunPowerWindData": null,
+    "calendarEventInfo": null,
+    "groupRideUUID": null,
+    "hasHeatMap": false,
+    "manualActivity": false,
+    "trimmed": false,
+    "autoCalcCalories": false,
+    "favorite": false,
+    "elevationCorrected": false,
+    "runPowerWindDataEnabled": null,
+    "personalRecord": false,
+    "gcj02": false
+  },
+  "summaryDTO": {
+    "startTimeLocal": "2026-05-09T09:46:00.0",
+    "startTimeGMT": "2026-05-09T07:46:00.0",
+    "distance": 0.0,
+    "duration": 7274.338,
+    "movingDuration": 3780.313,
+    "elapsedDuration": 7274.338,
+    "averageSpeed": 0.0,
+    "averageMovingSpeed": 0.0,
+    "calories": 713.0,
+    "bmrCalories": 197.0,
+    "averageHR": 108.0,
+    "maxHR": 142.0,
+    "minHR": 70.0,
+    "trainingEffect": 1.2999999523162842,
+    "anaerobicTrainingEffect": 0.10000000149011612,
+    "aerobicTrainingEffectMessage": "MINOR_AEROBIC_BENEFIT_6",
+    "anaerobicTrainingEffectMessage": "NO_ANAEROBIC_BENEFIT_0",
+    "totalExerciseReps": 154,
+    "activeSets": 28,
+    "waterEstimated": 1260.0,
+    "trainingEffectLabel": "AEROBIC_BASE",
+    "activityTrainingLoad": 14.669021606445312,
+    "minActivityLapDuration": 7274.338,
+    "steps": 308,
+    "differenceBodyBattery": -13
+  }
+}
