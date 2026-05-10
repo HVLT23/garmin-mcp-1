@@ -65,11 +65,13 @@ def test_trim_sleep_keeps_daily_sleep_dto_required_fields() -> None:
     trimmed = trim_sleep(full)
     daily = trimmed["dailySleepDTO"]
 
-    # Required fields the LLM needs to reason about a night.
+    # Required fields the LLM needs to reason about a night. The parallel
+    # `*Local` timestamp copies are dropped by the cross-cutting `_strip_pii`
+    # pass — the GMT versions remain and the LLM can derive local time.
     for kept in (
         "calendarDate",
-        "sleepStartTimestampLocal",
-        "sleepEndTimestampLocal",
+        "sleepStartTimestampGMT",
+        "sleepEndTimestampGMT",
         "sleepTimeSeconds",
         "napTimeSeconds",
         "deepSleepSeconds",
@@ -355,9 +357,11 @@ def test_trim_stress_keeps_summary_top_level() -> None:
 
     assert trimmed["calendarDate"] == "2026-05-09"
     assert trimmed["startTimestampGMT"] == 1746745200000
-    assert trimmed["startTimestampLocal"] == 1746748800000
     assert trimmed["endTimestampGMT"] == 1746745200000 + 24 * 3_600_000
-    assert trimmed["endTimestampLocal"] == 1746748800000 + 24 * 3_600_000
+    # `*Local` timestamp parallels are dropped by the cross-cutting `_strip_pii`
+    # pass — the GMT copy is the single source of truth.
+    assert "startTimestampLocal" not in trimmed
+    assert "endTimestampLocal" not in trimmed
     assert trimmed["avgStressLevel"] == 28
     assert trimmed["maxStressLevel"] == 90
     # Duration-breakdown summary fields pass through (denylist preserves them).
@@ -380,9 +384,7 @@ EXPECTED_STRESS_TOP_LEVEL_KEYS = frozenset(
     {
         "calendarDate",
         "startTimestampGMT",
-        "startTimestampLocal",
         "endTimestampGMT",
-        "endTimestampLocal",
         "avgStressLevel",
         "maxStressLevel",
         "stressDuration",
@@ -964,9 +966,10 @@ def test_trim_body_battery_keeps_summary_top_level() -> None:
     assert entry["charged"] == 65
     assert entry["drained"] == 28
     assert entry["startTimestampGMT"] == 1746745200000
-    assert entry["startTimestampLocal"] == 1746748800000
     assert entry["endTimestampGMT"] == 1746831600000
-    assert entry["endTimestampLocal"] == 1746835200000
+    # `*Local` parallels dropped by the cross-cutting `_strip_pii` pass.
+    assert "startTimestampLocal" not in entry
+    assert "endTimestampLocal" not in entry
 
 
 def test_trim_body_battery_keeps_compressed_transition_array() -> None:
@@ -998,9 +1001,7 @@ EXPECTED_BB_TOP_LEVEL_KEYS = frozenset(
         "charged",
         "drained",
         "startTimestampGMT",
-        "startTimestampLocal",
         "endTimestampGMT",
-        "endTimestampLocal",
         "bodyBatteryValuesArray",
         "bodyBatteryActivityEvent",
         "bodyBatteryDynamicFeedbackEvent",
@@ -1658,13 +1659,9 @@ def test_get_steps_passes_through_garmin_error(mcp_with_tools, mock_garmin) -> N
 _EXPECTED_HRV_KEYS = {
     "hrvSummary",
     "startTimestampGMT",
-    "startTimestampLocal",
     "endTimestampGMT",
-    "endTimestampLocal",
     "sleepStartTimestampGMT",
-    "sleepStartTimestampLocal",
     "sleepEndTimestampGMT",
-    "sleepEndTimestampLocal",
 }
 
 
@@ -1904,23 +1901,22 @@ _EXPECTED_DAILY_SUMMARY_KEYS = frozenset(
         "bodyBatteryMostRecentValue",
         "bodyBatteryDuringSleep",
         "bodyBatteryAtWakeTime",
-        # Spo2 (kept conditionally — see _DAILY_SUMMARY_SPO2_FIELDS)
+        # Spo2 (kept conditionally — see _DAILY_SUMMARY_SPO2_FIELDS).
+        # The parallel `*Local` timestamp variant is dropped by the
+        # cross-cutting `_strip_pii` pass.
         "averageSpo2",
         "lowestSpo2",
         "latestSpo2",
         "latestSpo2ReadingTimeGmt",
-        "latestSpo2ReadingTimeLocal",
         # Respiration summary (no per-minute stream; just the numbers)
         "avgWakingRespirationValue",
         "highestRespirationValue",
         "lowestRespirationValue",
         "latestRespirationValue",
         "latestRespirationTimeGMT",
-        # Wellness window timestamps
+        # Wellness window timestamps — only the GMT copy survives.
         "wellnessStartTimeGmt",
-        "wellnessStartTimeLocal",
         "wellnessEndTimeGmt",
-        "wellnessEndTimeLocal",
         # Misc
         "averageMonitoringEnvironmentAltitude",
         # Conditional medical signal — kept only when non-null
@@ -2006,6 +2002,8 @@ def test_trim_daily_summary_drops_spo2_block_when_all_null() -> None:
     assert "lowestSpo2" not in result
     assert "latestSpo2" not in result
     assert "latestSpo2ReadingTimeGmt" not in result
+    # `latestSpo2ReadingTimeLocal` is also dropped by the cross-cutting
+    # `_strip_pii` pass that strips all `*Local` timestamp parallels.
     assert "latestSpo2ReadingTimeLocal" not in result
 
 
@@ -2025,7 +2023,9 @@ def test_trim_daily_summary_keeps_spo2_block_when_any_reading_populated() -> Non
     assert result["lowestSpo2"] == 92
     assert result["latestSpo2"] == 95
     assert result["latestSpo2ReadingTimeGmt"] == "2026-05-09T05:30:00.0"
-    assert result["latestSpo2ReadingTimeLocal"] == "2026-05-09T07:30:00.0"
+    # The `*Local` parallel is dropped by `_strip_pii` even when the rest
+    # of the Spo2 block survives — GMT is the single source of truth.
+    assert "latestSpo2ReadingTimeLocal" not in result
 
 
 def test_trim_daily_summary_keeps_spo2_block_when_only_one_reading_populated() -> None:
@@ -2035,10 +2035,13 @@ def test_trim_daily_summary_keeps_spo2_block_when_only_one_reading_populated() -
     result = trim_daily_summary(full)
     assert result["averageSpo2"] == 97
     # The other Spo2 fields survive (as null) — partial-drop would lose them.
+    # `latestSpo2ReadingTimeLocal` is the one exception: it's dropped by
+    # the cross-cutting `_strip_pii` pass that strips every `*Local`
+    # timestamp parallel.
     assert "lowestSpo2" in result
     assert "latestSpo2" in result
     assert "latestSpo2ReadingTimeGmt" in result
-    assert "latestSpo2ReadingTimeLocal" in result
+    assert "latestSpo2ReadingTimeLocal" not in result
 
 
 def test_trim_daily_summary_drops_abnormal_hr_alerts_when_null() -> None:
@@ -2083,7 +2086,6 @@ _DAILY_SUMMARY_CONDITIONAL_KEYS = frozenset(
         "lowestSpo2",
         "latestSpo2",
         "latestSpo2ReadingTimeGmt",
-        "latestSpo2ReadingTimeLocal",
         "abnormalHeartRateAlertsCount",
     }
 )

@@ -38,6 +38,100 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+# Cross-cutting drops applied as a final pass by every trim helper via
+# `_strip_pii`. Three categories:
+#
+# 1. User-identity fields. Garmin returns these at multiple nesting levels
+#    (`userProfilePK` at the top of a stress response, `ownerId` /
+#    `ownerDisplayName` / `ownerFullName` / `ownerProfileImageUrl*` on each
+#    activity-summary item, `userInfoDto.displayName` / `fullName` /
+#    `profileImageUrl*` inside `activity.metadataDTO`, …). In an
+#    authenticated MCP context there is exactly one user and the LLM never
+#    reasons over their own identifiers — drop everywhere.
+# 2. Image URLs (`imageURL` / `imageUrl`). Appear in `recordedDevices` blocks
+#    (training_status / training_load when those tools are trimmed in a
+#    future PR) and in profile-image fields. Always unactionable for the LLM.
+# 3. `userPro` (boolean subscription flag). Mostly-default, never load-bearing.
+#
+# `displayname` / `displayName` / `fullname` / `fullName` cover both
+# camelCase and lowercase variants Garmin sometimes returns in the same
+# response (e.g. `ownerDisplayName` is camelCase but other endpoints emit
+# `displayname` lowercase). Cheap to include both.
+_PII_KEYS = frozenset(
+    {
+        # User identity
+        "userProfileId",
+        "userId",
+        "userProfilePK",
+        "userProfilePk",
+        "displayname",
+        "displayName",
+        "fullname",
+        "fullName",
+        "profileImageUrlSmall",
+        "profileImageUrlMedium",
+        "profileImageUrlLarge",
+        "ownerDisplayName",
+        "ownerFullName",
+        "ownerId",
+        "ownerProfileImageUrlSmall",
+        "ownerProfileImageUrlMedium",
+        "ownerProfileImageUrlLarge",
+        "userPro",
+        # Image URLs (any nesting level — `recordedDevices[].imageURL`, etc.)
+        "imageURL",
+        "imageUrl",
+    }
+)
+
+# Local-timestamp suffixes. Garmin returns parallel `*Gmt`/`*GMT` and
+# `*Local` copies of every timestamp (e.g. `startTimestampGMT` vs
+# `startTimestampLocal`, `wellnessStartTimeGmt` vs `wellnessStartTimeLocal`,
+# `readingTimeGmt` vs `readingTimeLocal`). The `*Local` copy is the same
+# wall-clock instant expressed in the user's timezone — given the GMT copy
+# is always present, the LLM can derive local from GMT + offset if needed,
+# so the `*Local` parallel is byte-for-byte redundant (~5–10% per payload).
+#
+# We restrict to the two suffix shapes Garmin actually emits (`TimeLocal`
+# and `TimestampLocal`) rather than a bare `Local` suffix to avoid
+# accidentally swallowing a future non-timestamp `someLocal`-named field.
+# `calendarDate` and other date-only fields (no time component) carry no
+# `Local` suffix and are unaffected.
+_LOCAL_TIMESTAMP_SUFFIXES = ("TimeLocal", "TimestampLocal")
+
+
+def _is_local_timestamp_key(key: Any) -> bool:
+    return isinstance(key, str) and any(
+        key.endswith(suffix) for suffix in _LOCAL_TIMESTAMP_SUFFIXES
+    )
+
+
+def _strip_pii(obj: Any) -> Any:
+    """Recursively drop PII / image-URL / `*Local`-timestamp duplicates.
+
+    Applied as the final pass of every per-tool trimmer so the cross-cutting
+    drops live in one place. Per-tool denylists / allowlists handle
+    tool-specific noise; this helper handles the patterns that recur
+    across every tool (user identity, image URLs, redundant `*Local`
+    timestamps).
+
+    Error stubs (dicts with an `error` key — produced by upstream
+    `safe_call`) pass through unchanged so the diagnostic isn't swallowed.
+    Non-dict / non-list inputs (None, str, int, …) pass through unchanged.
+    """
+    if isinstance(obj, dict):
+        if "error" in obj:
+            return obj
+        return {
+            k: _strip_pii(v)
+            for k, v in obj.items()
+            if k not in _PII_KEYS and not _is_local_timestamp_key(k)
+        }
+    if isinstance(obj, list):
+        return [_strip_pii(item) for item in obj]
+    return obj
+
+
 # Per-minute / per-5-min stream fields dropped by the aggregate tool's
 # lite trim. These dominate the upstream payload but no analytical use
 # case consumes them. The standalone `get_sleep` trim drops more via its
@@ -136,7 +230,7 @@ def trim_sleep_streams(sleep: Any) -> Any:
     hrv = trimmed.get("hrvData")
     if isinstance(hrv, dict) and "hrvReadings" in hrv:
         trimmed["hrvData"] = {k: v for k, v in hrv.items() if k != "hrvReadings"}
-    return trimmed
+    return _strip_pii(trimmed)
 
 
 def trim_sleep(sleep: Any) -> Any:
@@ -179,7 +273,7 @@ def trim_sleep(sleep: Any) -> Any:
             }
         trimmed["dailySleepDTO"] = filtered
 
-    return trimmed
+    return _strip_pii(trimmed)
 
 
 _HRV_DROP = frozenset({"hrvReadings", "userProfilePk"})
@@ -197,7 +291,7 @@ def trim_hrv(hrv: Any) -> Any:
     """
     if not isinstance(hrv, dict):
         return hrv
-    return {k: v for k, v in hrv.items() if k not in _HRV_DROP}
+    return _strip_pii({k: v for k, v in hrv.items() if k not in _HRV_DROP})
 
 
 # Always-drop noise: PII / chart-layout hints / descriptor metadata that
@@ -369,7 +463,7 @@ def trim_stress(stress: Any) -> Any:
     trimmed = {k: v for k, v in stress.items() if k not in drop}
     if buckets is not None:
         trimmed["stressBuckets"] = buckets
-    return trimmed
+    return _strip_pii(trimmed)
 
 
 # Top-level body-battery fields preserved by `trim_body_battery`. Anything
@@ -501,8 +595,8 @@ def trim_body_battery(payload: Any) -> Any:
     upstream diagnostics from `safe_call` aren't swallowed.
     """
     if isinstance(payload, list):
-        return [_trim_body_battery_entry(entry) for entry in payload]
-    return _trim_body_battery_entry(payload)
+        return [_strip_pii(_trim_body_battery_entry(entry)) for entry in payload]
+    return _strip_pii(_trim_body_battery_entry(payload))
 
 
 def _clean_steps_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -626,8 +720,8 @@ def trim_activity_summary(payload: Any) -> Any:
     list and the three S3 profile-image URLs duplicated on every item.
     """
     if isinstance(payload, list):
-        return [_trim_activity_summary_item(item) for item in payload]
-    return _trim_activity_summary_item(payload)
+        return [_strip_pii(_trim_activity_summary_item(item)) for item in payload]
+    return _strip_pii(_trim_activity_summary_item(payload))
 
 
 # Top-level fields kept by `trim_activity_detail`. The live `get_activity`
@@ -751,7 +845,7 @@ def trim_activity_detail(activity: Any) -> Any:
                 filtered[k] = v
         trimmed["metadataDTO"] = filtered
 
-    return trimmed
+    return _strip_pii(trimmed)
 
 
 # Per-lap fields dropped from each `lapDTOs` entry when empty. Both fields
@@ -794,7 +888,7 @@ def trim_activity_splits(splits: Any) -> Any:
     if isinstance(laps, list):
         trimmed["lapDTOs"] = [_trim_split_lap(lap) for lap in laps]
 
-    return trimmed
+    return _strip_pii(trimmed)
 
 
 def _trim_split_lap(lap: Any) -> Any:
@@ -927,7 +1021,7 @@ def trim_daily_summary(summary: Any) -> Any:
     if summary.get("abnormalHeartRateAlertsCount") is None:
         drop = drop | {"abnormalHeartRateAlertsCount"}
 
-    return {k: v for k, v in summary.items() if k not in drop}
+    return _strip_pii({k: v for k, v in summary.items() if k not in drop})
 
 
 def trim_steps(payload: Any) -> Any:
@@ -1008,4 +1102,4 @@ def trim_steps(payload: Any) -> Any:
             out.append(_clean_steps_entry(entry))
 
     _flush()
-    return out
+    return _strip_pii(out)
