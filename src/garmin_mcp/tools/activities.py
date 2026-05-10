@@ -53,7 +53,9 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             `qualifyingDive`, `atpActivity`, `manualActivity`,
             `purposeful`, `favorite`, `pr`, `autoCalcCalories`,
             `elevationCorrected`)
-          - redundant identifiers (`timeZoneId`, `activityUUID`)
+          - redundant identifiers (`timeZoneId`, `activityUUID`,
+            `beginTimestamp` (Unix-ms duplicate of `startTimeGMT`),
+            `sportTypeId` (numeric duplicate of `activityType.typeId`))
           - empty `summarizedDiveInfo` / `splitSummaries` wrappers
 
         Together these account for ~80% of a typical summary item. The

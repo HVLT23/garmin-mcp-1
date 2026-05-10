@@ -340,9 +340,20 @@ _EXPECTED_DETAIL_TOP_LEVEL_KEYS = frozenset(
 
 _EXPECTED_DETAIL_METADATA_KEYS = frozenset(
     {
+        # Unconditional keep
         "lapCount",
         "lastUpdateDate",
         "uploadedDate",
+        # Conditional keep (only when populated; absent on non-eBike /
+        # un-templated / sensor-less activities — i.e. the Strength
+        # fixture has none of these).
+        "eBikeBatteryUsage",
+        "eBikeBatteryRemaining",
+        "eBikeMaxAssistModes",
+        "eBikeAssistModeInfoDTOList",
+        "associatedWorkoutId",
+        "associatedCourseId",
+        "sensors",
     }
 )
 
@@ -426,6 +437,116 @@ def test_trim_activity_detail_drops_user_info_and_device_metadata() -> None:
         "deviceApplicationInstallationId",
     ):
         assert dropped not in meta, f"{dropped} should be dropped from metadataDTO"
+
+
+def test_trim_activity_detail_drops_null_conditional_metadata_fields() -> None:
+    """Strength fixture has null/empty eBike + course + sensors → all dropped.
+
+    Makes the conditional-keep behaviour explicit: when the conditional
+    fields are absent/null/empty, they don't leak through.
+    """
+    full = load_fixture("activity_payload_full")
+    trimmed = trim_activity_detail(full)
+    meta = trimmed["metadataDTO"]
+    for dropped in (
+        "eBikeBatteryUsage",
+        "eBikeBatteryRemaining",
+        "eBikeMaxAssistModes",
+        "eBikeAssistModeInfoDTOList",
+        "associatedWorkoutId",
+        "associatedCourseId",
+        "sensors",
+    ):
+        assert dropped not in meta, (
+            f"{dropped} is null/empty on the Strength fixture and should drop"
+        )
+
+
+def test_trim_activity_detail_keeps_populated_ebike_telemetry() -> None:
+    """An eBike ride's battery + assist-mode telemetry survives the trim.
+
+    Real eBike rides carry `eBike*` fields the LLM reasons over
+    ("how much battery did I burn? Which assist modes did I use?").
+    A previous version of this trim used a flat allowlist that dropped
+    them unconditionally — this test locks the eBike-friendly behaviour
+    in.
+    """
+    payload = {
+        "activityId": 42,
+        "activityName": "eBike Commute",
+        "metadataDTO": {
+            # Unconditional-keep fields (so the allowlist filter doesn't
+            # produce an empty metadataDTO and mask the conditional logic).
+            "lapCount": 1,
+            "lastUpdateDate": "2026-05-10T18:00:00.0",
+            "uploadedDate": "2026-05-10T18:00:00.0",
+            # Always-drop noise (must NOT leak through).
+            "userInfoDto": {"profileImageUrlLarge": "https://s3/x"},
+            "manufacturer": "GARMIN",
+            # Conditional-keep — eBike telemetry, must survive.
+            "eBikeBatteryUsage": 42,
+            "eBikeBatteryRemaining": 58,
+            "eBikeMaxAssistModes": 3,
+            "eBikeAssistModeInfoDTOList": [
+                {"mode": "ECO", "durationSeconds": 600},
+                {"mode": "TOUR", "durationSeconds": 1200},
+            ],
+        },
+    }
+    trimmed = trim_activity_detail(payload)
+    meta = trimmed["metadataDTO"]
+
+    # Conditional-keep eBike fields preserved.
+    assert meta["eBikeBatteryUsage"] == 42
+    assert meta["eBikeBatteryRemaining"] == 58
+    assert meta["eBikeMaxAssistModes"] == 3
+    assert meta["eBikeAssistModeInfoDTOList"] == [
+        {"mode": "ECO", "durationSeconds": 600},
+        {"mode": "TOUR", "durationSeconds": 1200},
+    ]
+    # Always-drop noise is still gone.
+    assert "userInfoDto" not in meta
+    assert "manufacturer" not in meta
+
+
+def test_trim_activity_detail_keeps_populated_workout_course_sensors() -> None:
+    """Templated workout + course + paired-sensor refs survive when set."""
+    payload = {
+        "activityId": 43,
+        "metadataDTO": {
+            "lapCount": 5,
+            "associatedWorkoutId": 7788,
+            "associatedCourseId": 9911,
+            "sensors": [
+                {"sensorType": "HEART_RATE", "manufacturer": "GARMIN"},
+                {"sensorType": "POWER", "manufacturer": "STAGES"},
+            ],
+        },
+    }
+    trimmed = trim_activity_detail(payload)
+    meta = trimmed["metadataDTO"]
+    assert meta["associatedWorkoutId"] == 7788
+    assert meta["associatedCourseId"] == 9911
+    assert meta["sensors"] == [
+        {"sensorType": "HEART_RATE", "manufacturer": "GARMIN"},
+        {"sensorType": "POWER", "manufacturer": "STAGES"},
+    ]
+
+
+def test_trim_activity_detail_drops_empty_sensors_list() -> None:
+    """An empty `sensors: []` is treated as absent and dropped.
+
+    `_is_meaningful` returns False for empty containers — keeps the
+    conditional-keep path symmetric with the null-value case so a
+    non-eBike activity that happens to carry `sensors: []` doesn't
+    pay the per-activity null tax.
+    """
+    payload = {
+        "activityId": 44,
+        "metadataDTO": {"lapCount": 1, "sensors": []},
+    }
+    trimmed = trim_activity_detail(payload)
+    assert "sensors" not in trimmed["metadataDTO"]
 
 
 def test_trim_activity_detail_keeps_summary_dto_intact() -> None:
@@ -593,12 +714,15 @@ def test_search_activities_by_type_default_payload_is_trimmed(mcp_with_tools, mo
 
     upstream_size = len(json.dumps(full))
     trimmed_size = len(json.dumps(result))
-    # Measured ~1.6x on Kamil's running activities (running keeps lat/lng,
-    # power zones, splitSummaries — legitimate signal that survives).
-    # Floor of 1.3x catches a regression that disables the PII drops.
-    assert trimmed_size * 13 < upstream_size * 10, (
+    # Measured ~1.58x on Kamil's running activities (running keeps
+    # lat/lng, power zones, splitSummaries — legitimate signal that
+    # survives). Floor of 1.4x catches a regression where only the
+    # 4 image-URL+userRoles drops are working (which by themselves
+    # would yield ~1.3x); the always-drop booleans + redundant
+    # identifiers contribute the rest.
+    assert trimmed_size * 7 < upstream_size * 5, (
         f"trimmed={trimmed_size} chars vs upstream={upstream_size}; "
-        "expected at least 1.3x reduction on the running fixture"
+        "expected at least 1.4x reduction on the running fixture"
     )
 
     for item in result:

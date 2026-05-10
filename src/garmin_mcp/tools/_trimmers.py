@@ -617,9 +617,9 @@ def trim_activity_summary(payload: Any) -> Any:
     over each entry. Non-list / non-dict inputs pass through unchanged so
     upstream diagnostics from `safe_call` aren't swallowed.
 
-    Measured ~2x reduction on Kamil's recent activities (e.g. a 5-item
-    `list_recent_activities` response: 19213 → 8609 chars, 2.23x; a
-    5-item `search_activities_by_type` for running: 17082 → 10795 chars,
+    Measured ~2x reduction on Kamil's recent activities (5-item
+    `list_recent_activities` response: 19213 → 8609 chars, 2.23x;
+    3-item `search_activities_by_type` for running: 17082 → 10795 chars,
     1.58x — running activities carry more legitimate signal like lat/lng,
     elevation, power zones, and populated `splitSummaries`, which pulls
     the ratio down). Drops are dominated by the `userRoles` OAuth scope
@@ -647,12 +647,12 @@ _ACTIVITY_DETAIL_TOP_LEVEL_KEEP = frozenset(
     }
 )
 
-# Fields kept inside `metadataDTO`. The block is almost entirely device /
-# audit metadata + a nested PII block (`userInfoDto` with image URLs);
-# we keep only the small set of fields with downstream analytical value:
-# `lapCount` (helps cross-reference the splits call), and the two upload /
-# update timestamps (data freshness signal). Everything else
-# (`deviceMetaDataDTO`, `userInfoDto`, `eBike*`, the
+# Fields kept inside `metadataDTO` unconditionally. The block is almost
+# entirely device / audit metadata + a nested PII block (`userInfoDto`
+# with image URLs); we keep only the small set of fields with downstream
+# analytical value: `lapCount` (helps cross-reference the splits call),
+# and the two upload / update timestamps (data freshness signal).
+# Everything else (`deviceMetaDataDTO`, `userInfoDto`, the
 # `has{Polyline,HeatMap,…}` UI hints, `isOriginal` / `trimmed` /
 # `personalRecord` / `gcj02` booleans, `manufacturer`, `childIds`,
 # `agentString`, `videoUrl`, etc.) is dropped.
@@ -664,6 +664,45 @@ _ACTIVITY_DETAIL_METADATA_KEEP = frozenset(
     }
 )
 
+# Fields kept inside `metadataDTO` *only when populated* (non-null /
+# non-empty). On a non-eBike / non-templated / sensor-less activity
+# every value is null, and unconditional pass-through would add ~80
+# bytes of `null` noise per activity. Conditional keep gives us
+# real telemetry when it exists without the per-activity null tax:
+#
+# - `eBike{BatteryUsage,BatteryRemaining,MaxAssistModes,AssistModeInfoDTOList}`
+#   are populated only for eBike rides. On a real eBike activity the
+#   LLM reasons over "how much battery did I burn / which assist modes
+#   did I cycle through?" — that's genuine telemetry, not bloat.
+# - `associatedWorkoutId` is set when the activity was driven by a
+#   Garmin Connect workout template ("did the user follow a planned
+#   workout?").
+# - `associatedCourseId` is set when the activity ran a Connect course
+#   ("did the user run a planned route?").
+# - `sensors` is the connected external-sensor list (HR strap, power
+#   meter, cadence sensor, …) when paired sensors were used; the LLM
+#   may use it to weight HR/power confidence.
+_ACTIVITY_DETAIL_METADATA_CONDITIONAL_KEEP = (
+    "eBikeBatteryUsage",
+    "eBikeBatteryRemaining",
+    "eBikeMaxAssistModes",
+    "eBikeAssistModeInfoDTOList",
+    "associatedWorkoutId",
+    "associatedCourseId",
+    "sensors",
+)
+
+
+def _is_meaningful(value: Any) -> bool:
+    """True if `value` is non-null and not an empty container.
+
+    `False` / `0` count as meaningful (a 0% battery reading is still
+    telemetry). Only `None`, `[]`, `{}`, `""` are treated as absent.
+    """
+    if value is None:
+        return False
+    return not (isinstance(value, (list, dict, str)) and not value)
+
 
 def trim_activity_detail(activity: Any) -> Any:
     """Trim a `get_activity` response (single activity-detail dict).
@@ -674,7 +713,13 @@ def trim_activity_detail(activity: Any) -> Any:
         `summaryDTO`, `timeZoneUnitDTO`, `metadataDTO`).
       - Allowlisting `metadataDTO` down to `lapCount` and the two
         upload/update timestamps — the rest of the block is device /
-        audit metadata + a PII sub-block (`userInfoDto`).
+        audit metadata + a PII sub-block (`userInfoDto`). Populated
+        eBike telemetry (`eBike{BatteryUsage,BatteryRemaining,…}`),
+        `associatedWorkoutId` / `associatedCourseId` (Connect workout /
+        course references), and a non-empty `sensors` list pass through
+        when present — they're real signal on the activities that have
+        them, and null/empty on the common case so the per-activity null
+        tax is avoided.
       - Dropping `accessControlRuleDTO`, `activityUUID`, `isMultiSportParent`,
         `userProfileId` at top level.
 
@@ -695,9 +740,16 @@ def trim_activity_detail(activity: Any) -> Any:
 
     meta = trimmed.get("metadataDTO")
     if isinstance(meta, dict):
-        trimmed["metadataDTO"] = {
-            k: v for k, v in meta.items() if k in _ACTIVITY_DETAIL_METADATA_KEEP
-        }
+        filtered = {k: v for k, v in meta.items() if k in _ACTIVITY_DETAIL_METADATA_KEEP}
+        # Conditional pass-through: keep populated eBike telemetry,
+        # workout/course associations, and connected-sensor list. On a
+        # null/empty value the field is dropped (the common case for
+        # non-eBike / un-templated activities).
+        for k in _ACTIVITY_DETAIL_METADATA_CONDITIONAL_KEEP:
+            v = meta.get(k)
+            if _is_meaningful(v):
+                filtered[k] = v
+        trimmed["metadataDTO"] = filtered
 
     return trimmed
 
