@@ -163,6 +163,39 @@ def test_strip_pii_drops_local_timestamp_suffixes() -> None:
     }
 
 
+def test_strip_pii_drops_lowercase_timestamp_local_variants() -> None:
+    """The predicate matches case-insensitively, so lowercase `timestampLocal`
+    (the bare-key form training_readiness emits) and other mixed/upper-case
+    `*timelocal` / `*timestamplocal` variants all drop.
+    """
+    payload = {
+        "timestampLocal": "2026-05-10T19:19:36.0",
+        "someTimeLocal": "2026-05-10T19:19:36.0",
+        "someTimestampLocal": "2026-05-10T19:19:36.0",
+        "TIMESTAMPLOCAL": "2026-05-10T19:19:36.0",
+        "foo": "bar",
+    }
+    assert _strip_pii(payload) == {"foo": "bar"}
+
+
+def test_strip_pii_drops_known_mixed_case_local_timestamps() -> None:
+    """Regression guard: every `*Local` key currently emitted by Garmin
+    fixtures still drops after the predicate became case-insensitive.
+    """
+    payload = {
+        "startTimestampLocal": 1,
+        "endTimestampLocal": 2,
+        "sleepStartTimestampLocal": 3,
+        "sleepEndTimestampLocal": 4,
+        "startTimeLocal": "2026-05-09T00:00:00.0",
+        "readingTimeLocal": "2026-05-09T05:30:00.0",
+        "wellnessStartTimeLocal": "2026-05-09T00:00:00.0",
+        "wellnessEndTimeLocal": "2026-05-09T23:59:59.0",
+        "keep": "me",
+    }
+    assert _strip_pii(payload) == {"keep": "me"}
+
+
 def test_strip_pii_does_not_drop_bare_local_keys() -> None:
     """A key ending in just `Local` (no `Time`/`Timestamp` prefix) is kept.
 
@@ -205,9 +238,15 @@ def test_strip_pii_is_local_timestamp_key_helper() -> None:
     assert _is_local_timestamp_key("readingTimeLocal")
     assert _is_local_timestamp_key("wellnessEndTimeLocal")
     assert _is_local_timestamp_key("latestSpo2ReadingTimeLocal")
+    # Case-insensitive: the lowercase parallel `timestampLocal` (which
+    # training_readiness emits) and other casings match.
+    assert _is_local_timestamp_key("timestampLocal")
+    assert _is_local_timestamp_key("TIMESTAMPLOCAL")
+    assert _is_local_timestamp_key("someTimestamplocal")
     # Non-suffixed `Local` keys are kept.
     assert not _is_local_timestamp_key("someLocal")
     assert not _is_local_timestamp_key("isLocal")
+    assert not _is_local_timestamp_key("datumLocal")
     # Non-strings (defensive — dict keys could theoretically be ints).
     assert not _is_local_timestamp_key(42)
     assert not _is_local_timestamp_key(None)

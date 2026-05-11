@@ -95,15 +95,18 @@ _PII_KEYS = frozenset(
 # We restrict to the two suffix shapes Garmin actually emits (`TimeLocal`
 # and `TimestampLocal`) rather than a bare `Local` suffix to avoid
 # accidentally swallowing a future non-timestamp `someLocal`-named field.
-# `calendarDate` and other date-only fields (no time component) carry no
-# `Local` suffix and are unaffected.
-_LOCAL_TIMESTAMP_SUFFIXES = ("TimeLocal", "TimestampLocal")
+# Matching is case-insensitive so lowercase parallels like `timestampLocal`
+# (training_readiness emits this bare-key form alongside `timestamp`) drop
+# without per-tool workarounds. `calendarDate` and other date-only fields
+# (no time component) carry no `Local` suffix and are unaffected.
+_LOCAL_TIMESTAMP_SUFFIXES = ("timelocal", "timestamplocal")
 
 
 def _is_local_timestamp_key(key: Any) -> bool:
-    return isinstance(key, str) and any(
-        key.endswith(suffix) for suffix in _LOCAL_TIMESTAMP_SUFFIXES
-    )
+    if not isinstance(key, str):
+        return False
+    lower = key.lower()
+    return any(lower.endswith(suffix) for suffix in _LOCAL_TIMESTAMP_SUFFIXES)
 
 
 def _strip_pii(obj: Any) -> Any:
@@ -1341,10 +1344,7 @@ def trim_training_load(payload: Any) -> Any:
     return _strip_pii({"mostRecentTrainingLoadBalance": new_load})
 
 
-# Always-drop noise from a training-readiness reading. `timestampLocal`
-# is the lowercase parallel of `timestamp` — it slips past the cross-cutting
-# `_strip_pii` suffix predicate (which matches `TimestampLocal` /
-# `TimeLocal` case-sensitively) so we drop it explicitly here.
+# Always-drop noise from a training-readiness reading.
 _TRAINING_READINESS_DROP = frozenset(
     {
         "deviceId",
@@ -1352,7 +1352,6 @@ _TRAINING_READINESS_DROP = frozenset(
         "validSleep",
         "inputContext",
         "primaryActivityTracker",
-        "timestampLocal",
     }
 )
 
