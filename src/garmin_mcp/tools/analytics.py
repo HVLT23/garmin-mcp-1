@@ -43,6 +43,14 @@ from garmin_mcp.cache import (
     cached,
 )
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
+from garmin_mcp.tools._trimmers import (
+    trim_body_battery,
+    trim_daily_summary,
+    trim_hrv,
+    trim_sleep,
+    trim_training_readiness,
+    trim_training_status,
+)
 from garmin_mcp.tools.aggregate import _capture, _parse_activity_start
 
 logger = logging.getLogger(__name__)
@@ -105,6 +113,27 @@ def _safe_get(d: Any, *keys: str) -> Any:
             return None
         cur = cur.get(k)
     return cur
+
+
+def _activity_type_key(activity: Any) -> str | None:
+    """Return an activity's `typeKey` from either Garmin shape, or None.
+
+    `get_activity()` returns the type under `activityTypeDTO.typeKey`
+    (the detail-endpoint shape), while `get_activities()` returns it
+    under `activityType.typeKey` (the list-endpoint shape). The earlier
+    code only looked at `activityType`, which made
+    `compare_activity_to_baseline` fail with `missing_type` whenever the
+    target's detail-endpoint payload was hit. Accept either shape.
+    """
+    if not isinstance(activity, dict):
+        return None
+    for parent_key in ("activityType", "activityTypeDTO"):
+        parent = activity.get(parent_key)
+        if isinstance(parent, dict):
+            key = parent.get("typeKey")
+            if isinstance(key, str) and key:
+                return key
+    return None
 
 
 def _pct(numer: float | int | None, denom: float | int | None) -> float | None:
@@ -447,7 +476,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             d = start.date()
             if d < window_start or d > anchor:
                 continue
-            type_key = _safe_get(a, "activityType", "typeKey")
+            type_key = _activity_type_key(a)
             if activity_type is not None and type_key != activity_type:
                 continue
             matched.append(a)
@@ -527,11 +556,14 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                 "message": f"activity {activity_id} returned non-dict",
             }
 
-        type_key = _safe_get(target, "activityType", "typeKey")
+        type_key = _activity_type_key(target)
         if type_key is None:
             return {
                 "error": "missing_type",
-                "message": f"activity {activity_id} has no activityType.typeKey",
+                "message": (
+                    f"activity {activity_id} has no typeKey under "
+                    "activityType or activityTypeDTO"
+                ),
             }
 
         start = _parse_activity_start(target)
@@ -558,7 +590,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                 continue
             if a.get("activityId") == target_id:
                 continue
-            if _safe_get(a, "activityType", "typeKey") != type_key:
+            if _activity_type_key(a) != type_key:
                 continue
             a_start = _parse_activity_start(a)
             if a_start is None:
@@ -656,7 +688,15 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         is fetched independently via the per-section `_capture` pattern
         from `aggregate.py` — one Garmin endpoint timing out doesn't
         blank the whole response, it shows up as an `{"error":
-        "fetch_failed", …}` stub for that section.
+        "fetch_failed", ...}` stub for that section.
+
+        Each section is trimmed via the same per-tool trim helpers used
+        by the standalone `get_X` tools, so the bundle stays bounded
+        (~10-15KB on a typical day rather than ~120KB+ raw — the upstream
+        sleep payload alone has per-minute movement / HR / respiration
+        streams that account for the bulk). Trim helpers all pass
+        `{"error": ...}` stubs through unchanged, so per-section failure
+        diagnostics aren't swallowed.
 
         Per-section TTLs: wellness sections use TTL_WELLNESS (30m),
         training sections use TTL_TRAINING_STATUS (60m). Errors are not
@@ -693,12 +733,12 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
 
         return {
             "date": d,
-            "sleep": sleep,
-            "hrv": hrv,
-            "body_battery": body_battery,
-            "training_readiness": readiness,
-            "training_status": training_status,
-            "daily_summary": daily_summary,
+            "sleep": trim_sleep(sleep),
+            "hrv": trim_hrv(hrv),
+            "body_battery": trim_body_battery(body_battery),
+            "training_readiness": trim_training_readiness(readiness),
+            "training_status": trim_training_status(training_status),
+            "daily_summary": trim_daily_summary(daily_summary),
         }
 
 
