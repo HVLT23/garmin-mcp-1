@@ -718,6 +718,97 @@ def test_compare_baseline_missing_start_time() -> None:
     assert r["error"] == "missing_start_time"
 
 
+def test_compare_baseline_handles_activityTypeDTO_target() -> None:
+    """Target from `get_activity` carries `activityTypeDTO`, not `activityType`.
+
+    Regression: live `compare_activity_to_baseline(22829162385, ...)` was
+    returning `missing_type` because the tool only looked at
+    `activityType.typeKey`. The detail endpoint puts the type under
+    `activityTypeDTO.typeKey`.
+    """
+    target = {
+        "activityId": 22829162385,
+        # Detail-endpoint shape — note the `DTO` suffix.
+        "activityTypeDTO": {"typeId": 13, "typeKey": "boxing"},
+        "startTimeLocal": "2026-05-14 09:00:00",
+        "duration": 60 * 86,
+        "averageHR": 150,
+        "calories": 900,
+        "activityTrainingLoad": 120.0,
+    }
+    # Baselines come from `get_activities` and use the list-endpoint shape.
+    baseline = [
+        _full_activity(aid=22829100100 + i, type_key="boxing",
+                       start=f"2026-05-{8+i} 09:00:00",
+                       duration=60 * 80, avg_hr=140, calories=820,
+                       training_load=100.0)
+        for i in range(3)
+    ]
+    mock = MagicMock()
+    mock.get_activity.return_value = target
+    _wire_activities(mock, [[*baseline]])
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "compare_activity_to_baseline")
+    r = fn(activity_id=22829162385, baseline_days=14)
+
+    assert "error" not in r
+    assert r["activity_type"] == "boxing"
+    assert r["baseline_n"] == 3
+    assert r["baseline_insufficient"] is False
+    assert "averageHR" in r["comparisons"]
+
+
+def test_compare_baseline_handles_mixed_shapes() -> None:
+    """Target uses `activityTypeDTO`, baseline list uses `activityType`.
+
+    Both shapes must resolve to the same `typeKey` so the baseline filter
+    finds matching activities.
+    """
+    target = {
+        "activityId": 500,
+        "activityTypeDTO": {"typeKey": "running"},
+        "startTimeLocal": "2026-05-14 07:00:00",
+        "duration": 60 * 35,
+        "averageHR": 155,
+        "calories": 400,
+        "activityTrainingLoad": 60.0,
+    }
+    baseline = [
+        # List-endpoint shape (no DTO suffix).
+        _full_activity(aid=410 + i, type_key="running",
+                       start=f"2026-05-{8+i} 07:00:00",
+                       duration=60 * 30, avg_hr=150, calories=380,
+                       training_load=55.0)
+        for i in range(3)
+    ]
+    mock = MagicMock()
+    mock.get_activity.return_value = target
+    _wire_activities(mock, [[*baseline]])
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "compare_activity_to_baseline")
+    r = fn(activity_id=500, baseline_days=14)
+
+    assert r["activity_type"] == "running"
+    assert r["baseline_n"] == 3
+    assert r["baseline_insufficient"] is False
+
+
+def test_compare_baseline_neither_shape_returns_missing_type() -> None:
+    """When both `activityType` and `activityTypeDTO` are absent, surface the error."""
+    mock = MagicMock()
+    mock.get_activity.return_value = {
+        "activityId": 1,
+        "startTimeLocal": "2026-05-14 09:00:00",
+    }
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "compare_activity_to_baseline")
+    r = fn(activity_id=1)
+    assert r["error"] == "missing_type"
+
+
 # ---------------------------------------------------------------------------
 # Tool 4: get_today_summary
 # ---------------------------------------------------------------------------
@@ -757,6 +848,93 @@ def test_today_summary_default_date_is_today(mcp_with_tools, mock_garmin) -> Non
     fn()
     today = dt.date.today().isoformat()
     mock_garmin.get_sleep_data.assert_called_with(today)
+
+
+def test_today_summary_returns_trimmed_sections() -> None:
+    """Each section must be trimmed by its per-tool helper before return.
+
+    Regression: live `get_today_summary` was returning ~123KB of raw
+    upstream payload because the tool dropped the trim layer that the
+    standalone `get_X` tools apply. Verifies (a) every always-drop field
+    is absent and (b) the serialized response is bounded.
+    """
+    import json
+
+    from tests.conftest import load_fixture
+
+    full_sleep = load_fixture("sleep_payload_full")
+    full_hrv = load_fixture("hrv_payload_full")
+    full_bb = load_fixture("body_battery_payload_full")
+    full_status = load_fixture("training_status_payload_full")
+    full_readiness = load_fixture("training_readiness_payload_full")
+    full_summary = load_fixture("daily_summary_payload_full")
+
+    mock = MagicMock()
+    mock.get_sleep_data.return_value = full_sleep
+    mock.get_hrv_data.return_value = full_hrv
+    mock.get_body_battery.return_value = full_bb
+    mock.get_training_status.return_value = full_status
+    mock.get_training_readiness.return_value = full_readiness
+    mock.get_user_summary.return_value = full_summary
+
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "get_today_summary")
+    r = fn(date="2026-05-09")
+
+    serialized = json.dumps(r)
+    # Raw upstream is well over 100KB; trimmed should comfortably fit
+    # below 30KB (gives headroom for fixture growth without masking
+    # a regression that re-introduces the per-minute streams).
+    assert len(serialized) < 30_000, f"trimmed bundle was {len(serialized)} chars"
+
+    # Per-section always-drop assertions — pulled from the live regression.
+    sleep = r["sleep"]
+    for dropped in (
+        "sleepMovement",
+        "sleepHeartRate",
+        "sleepStress",
+        "sleepBodyBattery",
+        "wellnessEpochRespirationDataDTOList",
+    ):
+        assert dropped not in sleep, f"sleep.{dropped} should be dropped"
+
+    hrv = r["hrv"]
+    assert "hrvReadings" not in hrv
+    assert "userProfilePk" not in hrv
+
+    daily = r["daily_summary"]
+    assert "userProfileId" not in daily
+    assert "uuid" not in daily
+
+    # Serialized form must not contain *Local timestamp keys at any depth
+    # (the cross-cutting `_strip_pii` pass drops them).
+    assert "userProfilePK" not in serialized
+    assert "userProfileId" not in serialized
+
+
+def test_today_summary_trim_passes_through_error_stubs() -> None:
+    """A failing section's `{error: fetch_failed}` stub must survive the trim layer."""
+    mock = MagicMock()
+    mock.get_sleep_data.side_effect = RuntimeError("boom")
+    mock.get_hrv_data.return_value = {"hrvSummary": {"lastNightAvg": 50}}
+    mock.get_body_battery.return_value = []
+    mock.get_training_status.return_value = {}
+    mock.get_training_readiness.return_value = []
+    mock.get_user_summary.return_value = {"calendarDate": "2026-05-09"}
+
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "get_today_summary")
+    r = fn(date="2026-05-09")
+
+    assert r["sleep"] == {
+        "error": "fetch_failed",
+        "message": "boom",
+        "section": "sleep",
+    }
+    # Other sections survived their trims.
+    assert r["hrv"]["hrvSummary"]["lastNightAvg"] == 50
 
 
 # ---------------------------------------------------------------------------
