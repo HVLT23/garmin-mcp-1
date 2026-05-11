@@ -243,6 +243,34 @@ curl -H "Authorization: Bearer $MCP_BEARER_TOKEN" https://<app-name>.fly.dev/mcp
 - *Bearer token*: `fly secrets set MCP_BEARER_TOKEN=<new>`; Fly restarts
   the machine. Update any clients that hold the old token.
 
+### Continuous deployment
+
+`.github/workflows/deploy.yml` redeploys the Fly app (`garmin-mcp-nrlo2w`)
+on every push to `main`. It installs `flyctl` on the runner and runs
+`flyctl deploy -a garmin-mcp-nrlo2w --remote-only`; the `-a` flag is passed
+explicitly because `fly.toml` ships the placeholder `app = "garmin-mcp"`.
+
+**Required secret.** Add a `FLY_API_TOKEN` to the repo's GitHub Actions
+secrets. Prefer a scoped, deploy-only token (cannot run `flyctl secrets`,
+`flyctl destroy`, etc.):
+
+```bash
+flyctl tokens create deploy -a garmin-mcp-nrlo2w --expiry 8760h   # 1 year
+gh secret set FLY_API_TOKEN -R kgabryje/garmin-mcp                # paste the token
+```
+
+**Skipping a deploy.** Either push to a non-`main` branch, or include
+`[skip deploy]` anywhere in the commit message (useful for docs-only
+changes that don't affect the runtime image).
+
+**Manual re-trigger.** The workflow accepts `workflow_dispatch`, so a
+deploy can be kicked off from the Actions UI's "Run workflow" button on
+the *Deploy to Fly* workflow without pushing a no-op commit.
+
+**Concurrency.** If a second commit lands on `main` while an earlier
+deploy is still in flight, the older deploy is cancelled and the new one
+takes over — guarantees the latest `main` is what's actually deployed.
+
 ## Multi-tenant deployment
 
 The HTTP transport supports multiple Garmin accounts on a single deployment.
