@@ -32,6 +32,7 @@ TTL_ACTIVITY_LIST = 60
 TTL_ACTIVITY_FINAL = 24 * 60 * 60
 TTL_WELLNESS = 30 * 60
 TTL_TRAINING_STATUS = 60 * 60
+TTL_PROFILE = 24 * 60 * 60
 
 _MAX_ENTRIES = 1024
 _caches: dict[int, tuple[TTLCache[tuple[Any, ...], Any], threading.RLock]] = {}
