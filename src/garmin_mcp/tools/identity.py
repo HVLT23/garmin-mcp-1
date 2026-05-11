@@ -95,10 +95,15 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         try:
             local_dt = datetime.fromisoformat(local)
             gmt_dt = datetime.fromisoformat(gmt)
-        except ValueError:
+            delta_seconds = (local_dt - gmt_dt).total_seconds()
+        except (ValueError, TypeError):
+            # `TypeError` covers the tz-aware-vs-naive subtraction case:
+            # if Garmin ever starts emitting one of the two timestamps
+            # with an offset suffix, the subtraction raises rather than
+            # ValueError, and we'd otherwise escape the per-field
+            # try/except and stub out the whole response.
             logger.debug("whoami: failed to parse activity timestamps", exc_info=True)
             return None
-        delta_seconds = (local_dt - gmt_dt).total_seconds()
         return round(delta_seconds / 60)
 
     @mcp.tool()
@@ -123,9 +128,14 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             Resolved from the user-settings endpoint when available,
             otherwise from the most-recent activity's `timeZoneId`.
             Null if neither source yields a string value.
-          - `timezone_offset_min`: current UTC offset in minutes,
-            derived from the most-recent activity's startTimeLocal/GMT
-            delta. Null if no recent activity exists.
+          - `timezone_offset_min`: UTC offset in minutes at the time of
+            the most-recent activity, derived from its
+            startTimeLocal/GMT delta. Null if no recent activity exists.
+            Note: this is a snapshot, not live data — combined with the
+            24h cache below, around a DST transition the reported offset
+            can lag wall-clock by an hour for up to a day. For
+            wall-clock-accurate offsets, the caller should derive from
+            `timezone` against current time.
 
         Cached for 24h per user — identity / timezone change rarely.
         """
