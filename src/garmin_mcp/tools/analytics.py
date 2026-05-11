@@ -140,10 +140,6 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     def _fetch_daily_summary(date: str) -> dict[str, Any]:
         return client_factory().get_user_summary(date) or {}
 
-    @cached(ttl=TTL_WELLNESS)
-    def _fetch_body_battery(date: str) -> list[dict[str, Any]]:
-        return client_factory().get_body_battery(date, date) or []
-
     @cached(ttl=TTL_TRAINING_STATUS)
     def _fetch_training_status(date: str) -> dict[str, Any]:
         return client_factory().get_training_status(date) or {}
@@ -154,6 +150,55 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         if isinstance(result, dict):
             return result.get("activityList", []) or []
         return result or []
+
+    # Hard ceiling so a user with thousands of activities can't make us
+    # walk the entire backfill. Garmin returns newest-first; at 5 sessions
+    # per day this covers ~7 months, well beyond any analytical window
+    # this module supports.
+    _ACTIVITY_WALK_CAP = 1000
+    _ACTIVITY_PAGE_SIZE = 50
+
+    def _walk_activities_back_to(
+        date_floor: dt.date,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Page through `get_activities` (newest-first) until the page's
+        oldest item is at or before `date_floor`.
+
+        Garmin's `get_activities(start, limit)` returns activities
+        newest-first. The brief's older single-page `start=0,
+        limit=max(50, days*5)` heuristic silently truncated whenever the
+        target was older than the page covered (e.g. a 14-day baseline
+        anchored on a 3-week-old run with 5 sessions/day).
+
+        Returns `(activities, pages_fetched, truncated)`. `truncated` is
+        True iff we hit the `_ACTIVITY_WALK_CAP` safety cap without
+        reaching the floor — callers should surface that so consumers
+        know the window may be incomplete.
+        """
+        out: list[dict[str, Any]] = []
+        start = 0
+        pages = 0
+        while True:
+            page = _fetch_activities(limit=_ACTIVITY_PAGE_SIZE, start=start)
+            pages += 1
+            if not page:
+                return out, pages, False
+            out.extend(page)
+            oldest_on_page: dt.date | None = None
+            for a in page:
+                if not isinstance(a, dict):
+                    continue
+                a_start = _parse_activity_start(a)
+                if a_start is None:
+                    continue
+                d = a_start.date()
+                if oldest_on_page is None or d < oldest_on_page:
+                    oldest_on_page = d
+            if oldest_on_page is None or oldest_on_page <= date_floor:
+                return out, pages, False
+            start += _ACTIVITY_PAGE_SIZE
+            if start >= _ACTIVITY_WALK_CAP:
+                return out, pages, True
 
     # ---- per-metric extractors ------------------------------------------
     # Each takes a date string and returns a numeric value or None.
@@ -227,9 +272,11 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         steps, vo2_max_generic, acute_training_load, chronic_training_load.
 
         The anchor_date defaults to today. The window is `days` days
-        ending on the anchor (inclusive). `weekly_avg` is the mean of the
-        last 7 days inclusive of the anchor; `monthly_avg` is the mean of
-        the full window when `days >= 30`, else None.
+        ending on the anchor (inclusive). Minimum `days=2`; smaller values
+        return `bad_argument` (a 1-sample window has no trend to compute).
+        `weekly_avg` is the mean of the last 7 days inclusive of the
+        anchor; `monthly_avg` is the mean of the full window when
+        `days >= 30`, else None.
 
         Trend qualification heuristic: if the regression slope's
         magnitude over the window is below 1.0 * population stddev, the
@@ -363,9 +410,12 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     ) -> dict[str, Any]:
         """Aggregate stats for activities in the last N days, optionally type-filtered.
 
-        Pulls a generous activity-list page and filters to those with a
-        `startTimeLocal` falling inside the [anchor-days+1, anchor] window
-        and (when `activity_type` is supplied) matching `activityType.typeKey`.
+        Pages through `get_activities` newest-first until the oldest item
+        on a page is at or before the window start, then filters to those
+        with a `startTimeLocal` inside [anchor-days+1, anchor] and (when
+        `activity_type` is supplied) matching `activityType.typeKey`.
+        `pages_fetched` and `truncated` are echoed back so callers can
+        tell when the safety cap fired and results may be incomplete.
 
         Distance-based stats skip activities with no distance (strength
         sessions, boxing, …). Median / p90 use `statistics.quantiles` so
@@ -380,9 +430,11 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         anchor = dt.date.fromisoformat(coerce_date(anchor_date))
         window_start = anchor - dt.timedelta(days=days - 1)
 
-        # Pull a deliberately generous list (the trimmed list size cap on
-        # the public tool is 20; we want the whole window).
-        raw = _fetch_activities(limit=max(50, days * 5), start=0)
+        # Page through newest-first until we cover the window. A single
+        # generous page would silently truncate for users with many
+        # activities per day; the walker handles that and reports
+        # `truncated: true` on the rare cap-hit.
+        raw, pages_fetched, truncated = _walk_activities_back_to(window_start)
 
         matched: list[dict[str, Any]] = []
         types_seen: dict[str, int] = {}
@@ -424,6 +476,8 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             "total_distance_km": round(sum(distances_km), 2) if distances_km else 0,
             "total_calories": round(sum(cals), 0) if cals else 0,
             "activities_per_week": round(n / days * 7, 2) if days else 0,
+            "pages_fetched": pages_fetched,
+            "truncated": truncated,
         }
         if hrs:
             result["hr_avg"] = _percentiles(hrs, with_minmax=True)
@@ -489,11 +543,13 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         target_date = start.date()
 
         # Baseline window: `baseline_days` preceding the target's date.
-        # We pull a generous list and filter — Garmin's get_activities is
-        # newest-first so widening the page covers multi-week back-fills.
-        raw = _fetch_activities(limit=max(50, baseline_days * 5), start=0)
+        # The walker pages newest-first until the page's oldest activity
+        # is at or before `baseline_start` — necessary because the target
+        # itself may be days/weeks old and 5+x/day trainers would otherwise
+        # see a single fixed page silently truncate older entries.
         target_id = target.get("activityId")
         baseline_start = target_date - dt.timedelta(days=baseline_days)
+        raw, pages_fetched, truncated = _walk_activities_back_to(baseline_start)
 
         baseline: list[dict[str, Any]] = []
         baseline_date_set: set[str] = set()
@@ -524,6 +580,8 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                 "comparisons": {},
                 "baseline_dates": baseline_dates,
                 "baseline_insufficient": True,
+                "pages_fetched": pages_fetched,
+                "truncated": truncated,
                 "note": (
                     "fewer than 3 baseline activities of this type in the "
                     "window — quantitative comparison suppressed"
@@ -578,6 +636,8 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             "comparisons": comparisons,
             "baseline_dates": baseline_dates,
             "baseline_insufficient": False,
+            "pages_fetched": pages_fetched,
+            "truncated": truncated,
         }
 
     # ------------------------------------------------------------------

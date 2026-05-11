@@ -104,6 +104,28 @@ def test_qualifier_buckets() -> None:
     assert _qualifier(None) is None
 
 
+def test_qualifier_boundary_at_exactly_10pct() -> None:
+    """Strict-inequality boundary: ±10.0 exactly are "typical", not low/elevated."""
+    assert _qualifier(-10.0) == "typical"
+    assert _qualifier(10.0) == "typical"
+    # And one ulp past the boundary flips the bucket.
+    assert _qualifier(-10.0001) == "low"
+    assert _qualifier(10.0001) == "elevated"
+
+
+def test_qualify_trend_single_outlier_is_stable() -> None:
+    """A flat baseline with one big spike in the middle should bucket as stable.
+
+    Pins the 1.0*stdev noise tolerance — future tuning that lowered it would
+    start labelling isolated spikes as a trend, which is exactly what the
+    threshold widening was meant to avoid. The spike is placed at index 6
+    (middle of a 14-day window) so its symmetric contribution to the slope
+    cancels out and we test the noise tolerance, not a trend-with-late-spike.
+    """
+    series = [50.0] * 6 + [80.0] + [50.0] * 7
+    assert _qualify_trend(series, _linreg_slope(series)) == "stable"
+
+
 def test_percentiles_minmax() -> None:
     out = _percentiles([float(v) for v in range(1, 11)], with_minmax=True)
     assert out["min"] == 1.0
@@ -244,6 +266,16 @@ def test_metric_trend_unknown_metric_returns_bad_argument() -> None:
     assert "supported" in r["message"]
 
 
+def test_metric_trend_days_below_two_returns_bad_argument() -> None:
+    """A 1-sample window has no trend to compute — must reject explicitly."""
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: MagicMock())
+    fn = get_tool(mcp, "get_metric_trend")
+    r = fn(metric="hrv_overnight", days=1)
+    assert r["error"] == "bad_argument"
+    assert "days" in r["message"]
+
+
 def test_metric_trend_default_anchor_is_today(monkeypatch) -> None:
     """anchor_date=None resolves to today.isoformat()."""
     today = dt.date.today()
@@ -303,6 +335,20 @@ def test_metric_trend_monthly_avg_when_30_days() -> None:
 # Tool 2: get_recent_activity_summary
 # ---------------------------------------------------------------------------
 
+def _wire_activities(mock: MagicMock, pages: list[list[dict]]) -> None:
+    """Make `mock.get_activities(start, limit)` honor pagination.
+
+    `pages` is the sequence of pages — page 0 returned for start=0,
+    page 1 for start=limit, …, then `[]` forever. The analytics walker
+    needs this to terminate; a flat `return_value=[...]` would replay
+    the same list indefinitely and trip the safety cap.
+    """
+    def _dispatch(start, limit, *args, **kwargs):
+        idx = start // limit if limit else 0
+        return pages[idx] if 0 <= idx < len(pages) else []
+    mock.get_activities.side_effect = _dispatch
+
+
 def _activity(
     *,
     aid: int,
@@ -333,7 +379,7 @@ def test_activity_summary_filters_by_type() -> None:
                   distance=0.0),
     ]
     mock = MagicMock()
-    mock.get_activities.return_value = activities
+    _wire_activities(mock, [activities])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "get_recent_activity_summary")
@@ -343,6 +389,8 @@ def test_activity_summary_filters_by_type() -> None:
     assert r["n_activities"] == 2
     # types_seen only emitted when activity_type=None.
     assert "types_seen" not in r
+    assert r["pages_fetched"] >= 1
+    assert r["truncated"] is False
 
 
 def test_activity_summary_no_filter_emits_types_seen() -> None:
@@ -352,7 +400,7 @@ def test_activity_summary_no_filter_emits_types_seen() -> None:
         _activity(aid=3, type_key="running", start="2026-05-10 07:00:00"),
     ]
     mock = MagicMock()
-    mock.get_activities.return_value = activities
+    _wire_activities(mock, [activities])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "get_recent_activity_summary")
@@ -371,7 +419,7 @@ def test_activity_summary_skips_zero_distance() -> None:
                   distance=0.0),
     ]
     mock = MagicMock()
-    mock.get_activities.return_value = activities
+    _wire_activities(mock, [activities])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "get_recent_activity_summary")
@@ -388,7 +436,7 @@ def test_activity_summary_window_excludes_outside_dates() -> None:
         _activity(aid=3, type_key="running", start="2026-06-01 07:00:00"),  # future
     ]
     mock = MagicMock()
-    mock.get_activities.return_value = activities
+    _wire_activities(mock, [activities])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "get_recent_activity_summary")
@@ -398,7 +446,7 @@ def test_activity_summary_window_excludes_outside_dates() -> None:
 
 def test_activity_summary_empty_window() -> None:
     mock = MagicMock()
-    mock.get_activities.return_value = []
+    _wire_activities(mock, [])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "get_recent_activity_summary")
@@ -406,6 +454,85 @@ def test_activity_summary_empty_window() -> None:
     assert r["n_activities"] == 0
     assert r["total_calories"] == 0
     assert r["activities_per_week"] == 0
+
+
+def test_activity_summary_walks_multiple_pages() -> None:
+    """Walker pages until the page's oldest activity precedes the window start."""
+    # 5 newest-first pages of 50 each: dates step backwards day-by-day.
+    # Window is days=14 anchored on 2026-05-14, so window_start=2026-05-01.
+    # Pages must cover at least back to 2026-05-01.
+    anchor = dt.date(2026, 5, 14)
+    page0 = [
+        _activity(aid=1000 + i, type_key="running",
+                  start=f"{(anchor - dt.timedelta(days=i)).isoformat()} 07:00:00")
+        for i in range(50)
+    ]
+    # Walker should terminate after page 0 since page 0's oldest
+    # is well past 2026-05-01.
+    mock = MagicMock()
+    _wire_activities(mock, [page0, [], []])
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "get_recent_activity_summary")
+    r = fn(days=14, anchor_date="2026-05-14")
+    # Only the 14 in-window activities counted.
+    assert r["n_activities"] == 14
+    assert r["pages_fetched"] == 1
+    assert r["truncated"] is False
+
+
+def test_activity_summary_walks_through_intra_window_pages() -> None:
+    """When activities are dense (all within the window), walker keeps paging."""
+    anchor = dt.date(2026, 5, 14)
+    # Page 0: all dated within the first half of the window (days 0..6 back).
+    # Page 1: all dated outside the window so the walker terminates after it.
+    page0 = [
+        _activity(aid=2000 + i, type_key="running",
+                  start=f"{(anchor - dt.timedelta(days=i % 7)).isoformat()} 09:00:00")
+        for i in range(50)
+    ]
+    # Page 1 entirely older than window_start (2026-05-01) → walker stops.
+    page1 = [
+        _activity(aid=2100 + i, type_key="running",
+                  start=f"{(anchor - dt.timedelta(days=20 + i)).isoformat()} 09:00:00")
+        for i in range(5)
+    ]
+    mock = MagicMock()
+    _wire_activities(mock, [page0, page1])
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "get_recent_activity_summary")
+    r = fn(days=14, anchor_date="2026-05-14")
+    # 50 in-window activities (page0); page1 outside window.
+    assert r["n_activities"] == 50
+    assert r["pages_fetched"] == 2
+    assert r["truncated"] is False
+
+
+def test_activity_summary_truncates_at_safety_cap() -> None:
+    """If the window never gets covered, walker stops at the safety cap.
+
+    The cap is 1000 (== 20 pages of 50). We feed 25 in-window pages and
+    expect the walker to bail at page 20 with `truncated: true`.
+    """
+    anchor = dt.date(2026, 5, 14)
+    # Every page has 50 activities dated within the 365-day window so the
+    # walker has no termination signal except the cap.
+    pages = []
+    for _ in range(25):
+        pages.append([
+            _activity(aid=3000 + i, type_key="running",
+                      start=f"{(anchor - dt.timedelta(days=1)).isoformat()} 09:00:00")
+            for i in range(50)
+        ])
+    mock = MagicMock()
+    _wire_activities(mock, pages)
+    mcp = FastMCP("test")
+    register_all(mcp, lambda: mock)
+    fn = get_tool(mcp, "get_recent_activity_summary")
+    r = fn(days=365, anchor_date="2026-05-14")
+    assert r["truncated"] is True
+    assert r["pages_fetched"] == 20
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +580,7 @@ def test_compare_baseline_happy_path() -> None:
     mock = MagicMock()
     mock.get_activity.return_value = target
     # get_activities returns newest-first; include target + baseline.
-    mock.get_activities.return_value = [target, *baseline]
+    _wire_activities(mock, [[target, *baseline]])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "compare_activity_to_baseline")
@@ -501,7 +628,7 @@ def test_compare_baseline_insufficient() -> None:
     ]
     mock = MagicMock()
     mock.get_activity.return_value = target
-    mock.get_activities.return_value = [target, *baseline]
+    _wire_activities(mock, [[target, *baseline]])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "compare_activity_to_baseline")
@@ -535,7 +662,7 @@ def test_compare_baseline_running_includes_run_specific_fields() -> None:
     ]
     mock = MagicMock()
     mock.get_activity.return_value = target
-    mock.get_activities.return_value = [target, *baseline]
+    _wire_activities(mock, [[target, *baseline]])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "compare_activity_to_baseline")
@@ -560,7 +687,7 @@ def test_compare_baseline_non_running_skips_running_fields() -> None:
     ]
     mock = MagicMock()
     mock.get_activity.return_value = target
-    mock.get_activities.return_value = [target, *baseline]
+    _wire_activities(mock, [[target, *baseline]])
     mcp = FastMCP("test")
     register_all(mcp, lambda: mock)
     fn = get_tool(mcp, "compare_activity_to_baseline")
@@ -609,12 +736,20 @@ def test_today_summary_full(mcp_with_tools, mock_garmin) -> None:
 
 def test_today_summary_partial_failure(mcp_with_tools, mock_garmin) -> None:
     """One section failing must NOT poison the whole bundle."""
+    # Pin a concrete daily-summary return so the surviving-section assertion
+    # checks against a real dict, not a MagicMock auto-attribute (where
+    # `in` would be accidentally truthy).
+    mock_garmin.get_user_summary.return_value = {
+        "calendarDate": "2026-05-09",
+        "totalSteps": 6260,
+    }
     mock_garmin.get_hrv_data.side_effect = RuntimeError("boom")
     fn = get_tool(mcp_with_tools, "get_today_summary")
     r = fn(date="2026-05-09")
     assert r["hrv"]["error"] == "fetch_failed"
-    # Unaffected sections still carry data.
-    assert "calendarDate" in r["daily_summary"] or "totalSteps" in r["daily_summary"]
+    # Unaffected section carries its concrete value.
+    assert r["daily_summary"]["calendarDate"] == "2026-05-09"
+    assert r["daily_summary"]["totalSteps"] == 6260
 
 
 def test_today_summary_default_date_is_today(mcp_with_tools, mock_garmin) -> None:
