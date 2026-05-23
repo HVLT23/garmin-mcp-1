@@ -1,7 +1,7 @@
 [project]
 name = "garmin-mcp"
 version = "0.1.0"
-description = "MCP server exposing read-only Garmin Connect data for AI training analysis"
+description = "Garmin Connect MCP server: read your training & wellness data, schedule structured running workouts"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.14"
