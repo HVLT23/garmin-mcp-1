@@ -1,9 +1,11 @@
 # garmin-mcp
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the
+A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the
 user's Garmin Connect data — activities, wellness signals (sleep, HRV, body battery, stress,
 steps), and training metrics (training status, readiness, VO2 max, training load) — so an
-AI assistant can analyse training sessions in the context of daily-life signals.
+AI assistant can analyse training sessions in the context of daily-life signals. A small
+write surface also lets an assistant push structured running workouts onto the user's
+Garmin calendar (Runna-style coaching).
 
 > **Personal-use disclaimer.** Garmin Connect has no public API for this data. This server is
 > built on top of [`garminconnect`](https://github.com/cyberjunky/python-garminconnect), which
@@ -83,8 +85,8 @@ directory — see `.env.example`).
 
 ## Tools
 
-All tools are **read-only**. Date arguments are ISO `YYYY-MM-DD`; date-defaulted tools fall
-back to today.
+Most tools are **read-only**; the four `Write` tools below are the only ones that mutate
+Garmin state. Date arguments are ISO `YYYY-MM-DD`; date-defaulted tools fall back to today.
 
 ### Activities
 
@@ -117,6 +119,91 @@ back to today.
   prior-night sleep + prior-day HRV + morning body battery + morning readiness + training
   load. The "prior night" date is derived from the activity's start time (if it began before
   04:00, the prior night = night of the day before yesterday).
+
+### Write tools (running workouts)
+
+These tools hit Garmin's unofficial workout endpoints. The endpoints have no SLA, no
+published contract, and the schema can drift without notice — treat success as best-effort.
+Scope is intentionally narrow: running only, no other sports, no wellness writes, no manual
+activity logging.
+
+- `schedule_running_workout(date, name, steps, description="")` — upload a structured
+  running workout and place it on the calendar on `date`. Returns
+  `{workout_id, scheduled_workout_id, date, name}`.
+- `unschedule_workout(scheduled_workout_id)` — remove the calendar entry. The template
+  stays in the library.
+- `delete_workout(workout_id)` — delete the template (also removes any calendar entry).
+- `list_scheduled_workouts(year, month)` — list scheduled workouts for a given month
+  (`month` is 1–12, the natural human form).
+
+**Important:** `unschedule_workout` takes `scheduled_workout_id`; `delete_workout` takes
+`workout_id`. They are different IDs returned by `schedule_running_workout` — don't mix
+them up.
+
+**Editing a workout.** Garmin's API has no `update_workout` operation. To "edit" a
+scheduled workout: `unschedule_workout(scheduled_workout_id)` →
+`delete_workout(workout_id)` → call `schedule_running_workout` again with the new
+parameters.
+
+#### The `steps` shape
+
+`steps` is a flat list of step dicts. Supported `type` values: `warmup`, `interval`,
+`recovery`, `cooldown`, `repeat`. For `repeat`, supply `iterations` and a nested `steps`
+list.
+
+Non-repeat step fields:
+
+| Field          | Values                                                                            |
+| -------------- | --------------------------------------------------------------------------------- |
+| `end_condition`| `time` (seconds), `distance` (meters), `heart_rate` (bpm), `calories`, `cadence`  |
+| `end_value`    | numeric — interpreted per `end_condition`                                         |
+| `target_type`  | `none`, `heart_rate_zone`, `pace_zone`, `cadence`, `open` (optional, default `none`) |
+| `target_low`   | numeric lower bound for the target (HR zone 1–5; pace in m/s; cadence in spm)     |
+| `target_high`  | numeric upper bound for the target                                                |
+| `description`  | freeform note attached to the step (optional)                                     |
+
+#### Example 1 — easy run
+
+10-min warmup, 30 min easy in HR zone 2, 5-min cooldown:
+
+```python
+schedule_running_workout(
+    date="2026-05-26",
+    name="Easy run",
+    steps=[
+        {"type": "warmup",   "end_condition": "time", "end_value": 600},
+        {"type": "interval", "end_condition": "time", "end_value": 1800,
+         "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2},
+        {"type": "cooldown", "end_condition": "time", "end_value": 300},
+    ],
+)
+```
+
+#### Example 2 — interval session
+
+10-min warmup, 6× (800 m at 4:00–4:10 / km pace + 2 min jog recovery), 5-min cooldown.
+Pace targets are in metres per second: 4:00/km = 1000 / 240 ≈ 4.17 m/s,
+4:10/km = 1000 / 250 = 4.0 m/s.
+
+```python
+schedule_running_workout(
+    date="2026-05-28",
+    name="6 × 800m @ 5k pace",
+    steps=[
+        {"type": "warmup", "end_condition": "time", "end_value": 600},
+        {
+            "type": "repeat",
+            "iterations": 6,
+            "steps": [
+                {"type": "interval", "end_condition": "distance", "end_value": 800,
+                 "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+                {"type": "recovery", "end_condition": "time", "end_value": 120},
+            ],
+        },
+        {"type": "cooldown", "end_condition": "time", "end_value": 300},
+    ],
+)
+```
 
 ## Claude Desktop config
 

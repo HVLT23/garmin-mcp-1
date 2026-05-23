@@ -1,0 +1,16 @@
+[
+  {
+    "scheduledWorkoutId": 111222333,
+    "workoutId": 9876543210,
+    "workoutName": "Easy run",
+    "date": "2026-05-26",
+    "sportType": {"sportTypeId": 1, "sportTypeKey": "running"}
+  },
+  {
+    "scheduledWorkoutId": 111222334,
+    "workoutId": 9876543211,
+    "workoutName": "6 × 800m @ 5k pace",
+    "date": "2026-05-28",
+    "sportType": {"sportTypeId": 1, "sportTypeKey": "running"}
+  }
+]

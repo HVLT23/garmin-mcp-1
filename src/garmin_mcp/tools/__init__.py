@@ -14,6 +14,7 @@ from garmin_mcp.tools import (
     identity,
     training,
     wellness,
+    workouts,
 )
 
 ClientFactory = Callable[[], Garmin]
@@ -27,3 +28,4 @@ def register_all(mcp: FastMCP, client_factory: ClientFactory) -> None:
     aggregate.register(mcp, client_factory)
     analytics.register(mcp, client_factory)
     identity.register(mcp, client_factory)
+    workouts.register(mcp, client_factory)
