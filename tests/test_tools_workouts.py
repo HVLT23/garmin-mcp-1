@@ -73,6 +73,92 @@ def test_schedule_running_workout_builds_repeat_group(mcp_with_tools, mock_garmi
     assert interval.targetValueOne == 4.0
     assert interval.targetValueTwo == 4.17
 
+    # stepOrder is a single depth-first sequence across the whole workout —
+    # repeat group gets N, its children N+1, N+2, next top-level continues
+    # after them. Load-bearing assumption Garmin relies on, so assert it.
+    warmup, repeat_grp, cooldown = segment_steps
+    inner_interval, inner_recovery = repeat_grp.workoutSteps
+    assert warmup.stepOrder == 1
+    assert repeat_grp.stepOrder == 2
+    assert inner_interval.stepOrder == 3
+    assert inner_recovery.stepOrder == 4
+    assert cooldown.stepOrder == 5
+
+
+def test_extra_fields_survive_to_dict(mcp_with_tools, mock_garmin) -> None:
+    """Targets and step descriptions are attribute-assigned after construction,
+    which only round-trips through `to_dict()` because ExecutableStep uses
+    pydantic `extra="allow"`. Regression-guard that contract — if a future SDK
+    release tightens it to `extra="ignore"`, this test fails loudly instead of
+    silently dropping targets from uploaded workouts.
+    """
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="With targets",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 1800,
+             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2,
+             "description": "stay easy"},
+        ],
+    )
+
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    payload = upload_arg.to_dict()
+    step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step["targetValueOne"] == 2.0
+    assert step["targetValueTwo"] == 2.0
+    assert step["description"] == "stay easy"
+
+
+def test_schedule_running_workout_negative_end_value(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[{"type": "interval", "end_condition": "time", "end_value": -600}],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_schedule_running_workout_zero_end_value(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[{"type": "interval", "end_condition": "time", "end_value": 0}],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_schedule_running_workout_bool_end_value(mcp_with_tools) -> None:
+    """`bool` is an `int` subclass — guard against `end_value=True` slipping
+    through as a 1-second step."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[{"type": "interval", "end_condition": "time", "end_value": True}],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_schedule_running_workout_bool_iterations(mcp_with_tools) -> None:
+    """Same `bool is int` trap on repeat iterations."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {
+                "type": "repeat",
+                "iterations": True,
+                "steps": [{"type": "interval", "end_condition": "time", "end_value": 60}],
+            }
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+
 
 def test_schedule_running_workout_bad_date(mcp_with_tools) -> None:
     fn = get_tool(mcp_with_tools, "schedule_running_workout")

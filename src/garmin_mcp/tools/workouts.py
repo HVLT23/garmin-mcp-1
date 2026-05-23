@@ -76,10 +76,14 @@ def _build_executable_step(spec: dict[str, Any], step_order: int) -> ExecutableS
     raw_end_value = spec.get("end_value")
     if raw_end_value is None:
         raise ValueError(f"end_value is required for step type {step_type!r}")
+    if isinstance(raw_end_value, bool):
+        raise ValueError(f"end_value must be numeric, got {raw_end_value!r}")
     try:
         end_value = float(raw_end_value)
     except (TypeError, ValueError) as e:
         raise ValueError(f"end_value must be numeric, got {raw_end_value!r}") from e
+    if end_value <= 0:
+        raise ValueError(f"end_value must be positive, got {raw_end_value!r}")
 
     target = spec.get("target_type", "none")
     if target not in _TARGET_TYPES:
@@ -127,7 +131,11 @@ def _build_steps(
             raise ValueError(f"each step must be a dict, got {type(spec).__name__}")
         if spec.get("type") == "repeat":
             iterations = spec.get("iterations")
-            if not isinstance(iterations, int) or iterations < 1:
+            if (
+                not isinstance(iterations, int)
+                or isinstance(iterations, bool)
+                or iterations < 1
+            ):
                 raise ValueError(
                     f"repeat step requires positive integer 'iterations', got {iterations!r}"
                 )
@@ -277,6 +285,11 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @safe_call
     def list_scheduled_workouts(year: int, month: int) -> Any:
         """List workouts scheduled in the user's calendar for a given month.
+
+        Returns the raw upstream payload — typically a list of dicts each
+        carrying at least `scheduledWorkoutId`, `workoutId`, `workoutName`,
+        `date`, and `sportType`. Garmin may include additional fields; this
+        tool does not trim or normalize them.
 
         Args:
             year: 4-digit year (>= 2000).
