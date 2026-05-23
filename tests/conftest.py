@@ -53,7 +53,10 @@ def mock_garmin() -> MagicMock:
     m.get_race_predictions.return_value = load_fixture("race_predictions")
 
     m.upload_running_workout.return_value = load_fixture("workout_upload_response")
-    m.schedule_workout.return_value = {"scheduledWorkoutId": 111222333}
+    # Live Garmin response uses bare `id` (verified against the calendar
+    # listing). Tests cover the `scheduledWorkoutId` and `workoutScheduleId`
+    # fallbacks separately.
+    m.schedule_workout.return_value = {"id": 111222333}
     m.unschedule_workout.return_value = {"status": "ok"}
     m.delete_workout.return_value = {"status": "ok"}
     m.get_scheduled_workouts.return_value = load_fixture("scheduled_workouts")

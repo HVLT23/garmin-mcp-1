@@ -97,18 +97,111 @@ def test_extra_fields_survive_to_dict(mcp_with_tools, mock_garmin) -> None:
         date="2026-05-26",
         name="With targets",
         steps=[
-            {"type": "interval", "end_condition": "time", "end_value": 1800,
-             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2,
-             "description": "stay easy"},
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17,
+             "description": "stay smooth"},
         ],
     )
 
     upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
     payload = upload_arg.to_dict()
     step = payload["workoutSegments"][0]["workoutSteps"][0]
-    assert step["targetValueOne"] == 2.0
-    assert step["targetValueTwo"] == 2.0
-    assert step["description"] == "stay easy"
+    assert step["targetValueOne"] == 4.0
+    assert step["targetValueTwo"] == 4.17
+    assert step["description"] == "stay smooth"
+
+
+def test_hr_zone_target_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
+    """Garmin renders HR-zone targets from a `zoneNumber` field, not a
+    bpm range. Live test: a recovery step with target_low=target_high=2
+    rendered as `2-2 bpm` (raw heart-rate range) when we sent
+    targetValueOne/Two. The fix is to set `zoneNumber` instead.
+    """
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="HR zone test",
+        steps=[
+            {"type": "recovery", "end_condition": "time", "end_value": 120,
+             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2},
+        ],
+    )
+
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    payload = upload_arg.to_dict()
+    step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step.get("zoneNumber") == 2
+    assert isinstance(step["zoneNumber"], int)
+    assert "targetValueOne" not in step
+    assert "targetValueTwo" not in step
+
+
+def test_pace_zone_target_keeps_value_one_two(mcp_with_tools, mock_garmin) -> None:
+    """Regression guard for the HR-zone fix: pace_zone steps must continue
+    to emit raw m/s bounds in targetValueOne/Two (verified live to render
+    correctly as e.g. `4:00-4:10 min/km`).
+    """
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="Pace zone test",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+        ],
+    )
+
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    payload = upload_arg.to_dict()
+    step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step["targetValueOne"] == 4.0
+    assert step["targetValueTwo"] == 4.17
+    assert "zoneNumber" not in step
+
+
+def test_hr_zone_target_rejects_out_of_range(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "heart_rate_zone", "target_low": 7, "target_high": 7},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_schedule_response_id_field(mcp_with_tools, mock_garmin) -> None:
+    """The live Garmin response uses `id` for the scheduled-workout id —
+    not `scheduledWorkoutId`. Conftest fixture matches the live shape;
+    this asserts the extractor handles it.
+    """
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
+    assert result["scheduled_workout_id"] == 111222333
+
+
+def test_schedule_response_scheduledworkoutid_field(mcp_with_tools, mock_garmin) -> None:
+    """Some Garmin Connect versions use `scheduledWorkoutId` — keep that
+    name in the extraction priority list.
+    """
+    mock_garmin.schedule_workout.return_value = {"scheduledWorkoutId": 999}
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
+    assert result["scheduled_workout_id"] == 999
+
+
+def test_schedule_response_unknown_shape_returns_none(mcp_with_tools, mock_garmin) -> None:
+    """If Garmin returns a shape we don't recognise, we surface None rather
+    than guessing the wrong field. The schedule itself still succeeded —
+    the caller can recover the id via `list_scheduled_workouts`.
+    """
+    mock_garmin.schedule_workout.return_value = {"unexpected": "shape"}
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
+    assert result["scheduled_workout_id"] is None
+    assert result["workout_id"] == 9876543210
 
 
 def test_schedule_running_workout_negative_end_value(mcp_with_tools) -> None:
@@ -232,6 +325,38 @@ def test_list_scheduled_workouts_shape(mcp_with_tools, mock_garmin) -> None:
     result = fn(year=2026, month=5)
     # The lib internally subtracts 1 from month — we pass 1-12 unchanged.
     mock_garmin.get_scheduled_workouts.assert_called_once_with(2026, 5)
-    assert isinstance(result, list)
-    assert result[0]["scheduledWorkoutId"] == 111222333
-    assert result[0]["date"] == "2026-05-26"
+    # Trimmed: dict with `calendarItems`, each entry keeps `id` (the
+    # scheduled-workout id), `workoutId`, `title`, `date`, `itemType`.
+    assert isinstance(result, dict)
+    items = result["calendarItems"]
+    assert len(items) == 2
+    first = items[0]
+    assert first["id"] == 1657942990
+    assert first["workoutId"] == 1576479785
+    assert first["date"] == "2026-05-24"
+    assert first["itemType"] == "workout"
+
+
+def test_list_scheduled_workouts_trims_noise(mcp_with_tools) -> None:
+    """The trim must drop the dive / badge / nap / swim noise fields plus
+    any value that is null on the entry."""
+    fn = get_tool(mcp_with_tools, "list_scheduled_workouts")
+    result = fn(year=2026, month=5)
+    first = result["calendarItems"][0]
+    # Known-always-null in the live sample — must be stripped.
+    for dropped in ("napStartTimeLocal", "bottomTime", "userBadgeId",
+                    "maxDepth", "shareableEventUuid", "wellnessActivityUuid"):
+        assert dropped not in first, f"{dropped!r} should be trimmed"
+    # Null-valued fields on this specific entry also drop.
+    assert "duration" not in first  # was null on the workout entry
+    assert "calories" not in first
+
+
+def test_list_scheduled_workouts_verbose_returns_untrimmed(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "list_scheduled_workouts")
+    result = fn(year=2026, month=5, verbose=True)
+    # Untrimmed: noise fields survive (null values kept).
+    first = result["calendarItems"][0]
+    assert "napStartTimeLocal" in first
+    assert "bottomTime" in first
+    assert "userBadgeId" in first

@@ -20,6 +20,7 @@ from garminconnect.workout import (
 from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
+from garmin_mcp.tools._trimmers import trim_scheduled_workouts
 
 ClientFactory = Callable[[], Garmin]
 
@@ -102,10 +103,28 @@ def _build_executable_step(spec: dict[str, Any], step_order: int) -> ExecutableS
 
     target_low = spec.get("target_low")
     target_high = spec.get("target_high")
-    if target_low is not None:
-        step.targetValueOne = float(target_low)
-    if target_high is not None:
-        step.targetValueTwo = float(target_high)
+    if target == "heart_rate_zone":
+        # Garmin renders HR-zone targets from a single `zoneNumber` (1-5).
+        # Encoding the zone in `targetValueOne/Two` makes Connect treat the
+        # value as a raw bpm range — a recovery step with low=high=2 then
+        # displays as "2-2 bpm" instead of "Zone 2". `extra="allow"` on
+        # `ExecutableStep` lets us set the field even though it isn't in
+        # the SDK's declared schema.
+        if target_low is None:
+            raise ValueError("heart_rate_zone target requires target_low (the zone number 1-5)")
+        zone = int(target_low)
+        if zone < 1 or zone > 5:
+            raise ValueError(f"heart_rate_zone target_low must be 1-5, got {target_low!r}")
+        step.zoneNumber = zone
+    else:
+        # `pace_zone` (m/s bounds in targetValueOne/Two) and `cadence`
+        # (spm bounds) use a numeric range. `pace_zone` is verified live.
+        # `cadence` is unverified live — if Garmin renders it wrong, this
+        # is the place that needs the zone-number treatment.
+        if target_low is not None:
+            step.targetValueOne = float(target_low)
+        if target_high is not None:
+            step.targetValueTwo = float(target_high)
 
     description = spec.get("description")
     if description:
@@ -149,6 +168,24 @@ def _build_steps(
             result.append(_build_executable_step(spec, order))
             order += 1
     return result, order
+
+
+# Garmin's `POST /schedule/{workout_id}` response shape isn't documented and
+# isn't stable across Connect versions. The calendar-listing endpoint exposes
+# the scheduled-entry id under `id`; older clients also saw `scheduledWorkoutId`
+# and `workoutScheduleId`. Try the named keys first, then fall back to `id` —
+# whichever survives is the integer to return.
+_SCHEDULED_WORKOUT_ID_KEYS = ("scheduledWorkoutId", "workoutScheduleId", "id")
+
+
+def _extract_scheduled_workout_id(resp: Any) -> int | None:
+    if not isinstance(resp, dict):
+        return None
+    for key in _SCHEDULED_WORKOUT_ID_KEYS:
+        val = resp.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+    return None
 
 
 def _estimate_duration_secs(steps: list[ExecutableStep | RepeatGroup]) -> int:
@@ -200,7 +237,13 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                   - `target_type` (optional): `none`, `heart_rate_zone`,
                     `pace_zone`, `cadence`, `open`
                   - `target_low`, `target_high` (optional): numeric bounds.
-                    HR zone uses 1-5; pace zone uses m/s; cadence uses spm
+                    HR zone uses 1-5 (pass the zone number as `target_low`;
+                    `target_high` is ignored — Garmin renders HR targets
+                    from a single zone number, not a bpm range). Pace zone
+                    uses m/s bounds (verified live). Cadence uses spm bounds
+                    (live-rendering unverified — if it shows as a raw spm
+                    range instead of a zone label, the encoding needs the
+                    same `zoneNumber` treatment as HR)
                   - `description` (optional): freeform note shown on the step
             description: Optional freeform description attached to the
                 workout template.
@@ -241,7 +284,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             raise ValueError(f"Garmin did not return a workoutId; response: {upload_resp!r}")
 
         schedule_resp = client.schedule_workout(workout_id, date_iso)
-        scheduled_workout_id = schedule_resp.get("scheduledWorkoutId")
+        scheduled_workout_id = _extract_scheduled_workout_id(schedule_resp)
 
         return {
             "workout_id": workout_id,
@@ -283,17 +326,27 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
     @mcp.tool()
     @audited
     @safe_call
-    def list_scheduled_workouts(year: int, month: int) -> Any:
-        """List workouts scheduled in the user's calendar for a given month.
+    def list_scheduled_workouts(year: int, month: int, verbose: bool = False) -> Any:
+        """List calendar items scheduled in the user's calendar for a given month.
 
-        Returns the raw upstream payload — typically a list of dicts each
-        carrying at least `scheduledWorkoutId`, `workoutId`, `workoutName`,
-        `date`, and `sportType`. Garmin may include additional fields; this
-        tool does not trim or normalize them.
+        By default (verbose=False) the upstream `/calendar/year/{y}/month/{m}`
+        response is trimmed: each entry under `calendarItems` keeps only the
+        analytically useful fields. Dropped: ~50 dive / badge / social /
+        swim / pack / nap fields that don't apply to scheduled workouts,
+        plus any field whose value is null on a given entry. Retained per
+        entry: `id` (the scheduled-workout id — pass this to
+        `unschedule_workout`), `workoutId`, `title`, `date`, `sportTypeKey`,
+        `itemType`, `trainingPlanId`, and a handful of populated activity /
+        workout stats.
+
+        Pass verbose=True to get the un-modified upstream response (~75K
+        chars for a normal month — mostly `null` noise).
 
         Args:
             year: 4-digit year (>= 2000).
             month: 1-12. The underlying library converts to Garmin's
                 0-indexed month internally — pass the natural 1-12 value.
+            verbose: If True, return the full upstream payload (default False).
         """
-        return client_factory().get_scheduled_workouts(year, month)
+        full = client_factory().get_scheduled_workouts(year, month)
+        return full if verbose else trim_scheduled_workouts(full)

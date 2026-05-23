@@ -1537,3 +1537,134 @@ def trim_vo2_max(payload: Any) -> Any:
         out["cycling"] = block["cycling"]  # null passes through explicitly
 
     return _strip_pii(out)
+
+
+# Always-drop noise on each `calendarItems[]` entry returned by
+# `list_scheduled_workouts`. Garmin's `/calendar/year/{y}/month/{m}` endpoint
+# returns a union over every possible calendar-item type — scheduled workouts,
+# completed activities, naps, badges, dives, courses, hikes, swims — and each
+# entry carries every field from every variant, with everything not applicable
+# set to null. On a real month with a handful of items the response is ~75K
+# chars; ~70 of the ~100 per-item fields are always null for workouts.
+#
+# Three buckets:
+#
+# 1. Fields verified null across all 33 items in Kamil's live sample (mixed
+#    workouts, activities, naps). Safe to drop unconditionally — they only
+#    populate for item types we don't expose via this tool.
+# 2. Dive / badge / social / wellness / swim / pack fields that *can* be
+#    non-null for the right item type but are never workout-relevant. Dropping
+#    these even on activity items keeps the payload focused on scheduling
+#    rather than completed-activity reporting (the dedicated activity tools
+#    are the right surface for that).
+# 3. UI hints and redundant alternate keys (`hasSplits`, `autoCalcCalories`,
+#    `workoutUuid` — `workoutId` is the canonical reference).
+#
+# Per-entry null fields are dropped after this denylist by `_drop_nulls` so
+# fields that *could* be informative (e.g. `recurrenceId`) survive when set
+# but don't pay the null-noise tax when not.
+_SCHEDULED_WORKOUT_DROP_ALWAYS = frozenset(
+    {
+        # Dive
+        "diveNumber",
+        "maxDepth",
+        "avgDepth",
+        "surfaceInterval",
+        "bottomTime",
+        "decoDive",
+        # Badge
+        "userBadgeId",
+        "badgeCategoryTypeId",
+        "badgeCategoryTypeDesc",
+        "badgeAwardedDate",
+        "badgeViewed",
+        "hideBadge",
+        # Social / sharing
+        "shareableEventUuid",
+        "shareableEvent",
+        "subscribed",
+        "primaryEvent",
+        # Wellness / nap (napStartTimeLocal is also dropped by _strip_pii)
+        "wellnessActivityUuid",
+        "napStartTimeLocal",
+        # Swim
+        "unitOfPoolLength",
+        "strokes",
+        # Hike / pack
+        "beginPackWeight",
+        "maxPackWeight",
+        # Other always-null in the live sample (verified across 33 items)
+        "atpPlanId",
+        "avgRespirationRate",
+        "completionTarget",
+        "courseId",
+        "courseName",
+        "difference",
+        "differenceStress",
+        "eventTimeLocal",
+        "floorsClimbed",
+        "groupId",
+        "isRace",
+        "isStart",
+        "location",
+        "maxGradeValue",
+        "parentId",
+        "recurrenceId",
+        "splitSummaryMode",
+        "url",
+        "weight",
+        # UI hints / redundant
+        "hasSplits",
+        "autoCalcCalories",
+        "workoutUuid",
+    }
+)
+
+
+def _trim_scheduled_workout_item(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    if "error" in item:
+        return item
+    trimmed = {
+        k: v
+        for k, v in item.items()
+        if k not in _SCHEDULED_WORKOUT_DROP_ALWAYS and v is not None
+    }
+    return trimmed
+
+
+def trim_scheduled_workouts(payload: Any) -> Any:
+    """Trim the calendar payload returned by `list_scheduled_workouts`.
+
+    The upstream `GET /calendar/year/{y}/month/{m}` response is a dict with
+    a `calendarItems` list — each entry a union over every possible calendar
+    item type (workout, activity, nap, badge, dive, course, …) with all
+    inapplicable fields set to null. On a typical month this is ~75K chars
+    for a handful of real items; the trim drops ~50 always-null/irrelevant
+    fields per entry (dive depth, badge metadata, swim strokes, pack weight,
+    social-share UUIDs, etc.) plus any field whose value is null on a given
+    entry, yielding a >5x reduction in practice.
+
+    Retained per entry: `id` (scheduled-workout id), `workoutId`, `title`,
+    `date`, `sportTypeKey`, `itemType`, `trainingPlanId`, plus any of
+    `protectedWorkoutSchedule`, `phasedTrainingPlan`, `activityTypeId`,
+    `duration`, `distance`, `calories`, `elapsedDuration`, `averageHR`,
+    `maxSpeed`, `isParent`, `lapCount`, `noOfSplits`, `totalAscent`,
+    `climbDuration`, `activeSets`, `hasSplits` (when populated).
+
+    Non-dict inputs (e.g. error stubs from `safe_call`) pass through
+    unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if "error" in payload:
+        return payload
+
+    items = payload.get("calendarItems")
+    if not isinstance(items, list):
+        return _strip_pii(payload)
+
+    trimmed_items = [_trim_scheduled_workout_item(item) for item in items]
+    out = {**payload, "calendarItems": trimmed_items}
+    return _strip_pii(out)

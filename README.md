@@ -133,8 +133,9 @@ activity logging.
 - `unschedule_workout(scheduled_workout_id)` — remove the calendar entry. The template
   stays in the library.
 - `delete_workout(workout_id)` — delete the template (also removes any calendar entry).
-- `list_scheduled_workouts(year, month)` — list scheduled workouts for a given month
-  (`month` is 1–12, the natural human form).
+- `list_scheduled_workouts(year, month, verbose=False)` — list scheduled calendar items
+  for a given month (`month` is 1–12, the natural human form). The response is trimmed
+  by default; pass `verbose=True` for the un-modified upstream payload.
 
 **Important:** `unschedule_workout` takes `scheduled_workout_id`; `delete_workout` takes
 `workout_id`. They are different IDs returned by `schedule_running_workout` — don't mix
@@ -161,6 +162,12 @@ Non-repeat step fields:
 | `target_low`   | numeric lower bound for the target (HR zone 1–5; pace in m/s; cadence in spm)     |
 | `target_high`  | numeric upper bound for the target                                                |
 | `description`  | freeform note attached to the step (optional)                                     |
+
+Target encoding has been verified against Garmin Connect: `heart_rate_zone` uses a single
+zone number (pass `target_low` 1–5; `target_high` is ignored), `pace_zone` uses raw m/s
+bounds (verified live). `cadence` encoding is **unverified live** — if Garmin renders a
+cadence target as a raw spm range instead of a zone label, it likely needs the same
+zone-number treatment as HR.
 
 #### Example 1 — easy run
 
