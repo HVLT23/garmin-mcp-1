@@ -1560,9 +1560,15 @@ def trim_vo2_max(payload: Any) -> Any:
 # 3. UI hints and redundant alternate keys (`hasSplits`, `autoCalcCalories`,
 #    `workoutUuid` — `workoutId` is the canonical reference).
 #
-# Per-entry null fields are dropped after this denylist by `_drop_nulls` so
-# fields that *could* be informative (e.g. `recurrenceId`) survive when set
-# but don't pay the null-noise tax when not.
+# Per-entry null fields are dropped after this denylist by the inline
+# `v is not None` filter in `_trim_scheduled_workout_item`, so fields that
+# *could* be informative (e.g. `recurrenceId` for a recurring schedule)
+# survive when set but don't pay the null-noise tax when not.
+#
+# `*Local` timestamp suffixes (e.g. `napStartTimeLocal`, `eventTimeLocal`,
+# `startTimestampLocal`) are intentionally NOT listed here — they're handled
+# by `_strip_pii`'s `*Local` predicate as a single source of truth across
+# every trimmer.
 _SCHEDULED_WORKOUT_DROP_ALWAYS = frozenset(
     {
         # Dive
@@ -1584,9 +1590,8 @@ _SCHEDULED_WORKOUT_DROP_ALWAYS = frozenset(
         "shareableEvent",
         "subscribed",
         "primaryEvent",
-        # Wellness / nap (napStartTimeLocal is also dropped by _strip_pii)
+        # Wellness
         "wellnessActivityUuid",
-        "napStartTimeLocal",
         # Swim
         "unitOfPoolLength",
         "strokes",
@@ -1601,7 +1606,6 @@ _SCHEDULED_WORKOUT_DROP_ALWAYS = frozenset(
         "courseName",
         "difference",
         "differenceStress",
-        "eventTimeLocal",
         "floorsClimbed",
         "groupId",
         "isRace",
@@ -1609,7 +1613,6 @@ _SCHEDULED_WORKOUT_DROP_ALWAYS = frozenset(
         "location",
         "maxGradeValue",
         "parentId",
-        "recurrenceId",
         "splitSummaryMode",
         "url",
         "weight",
@@ -1651,7 +1654,7 @@ def trim_scheduled_workouts(payload: Any) -> Any:
     `protectedWorkoutSchedule`, `phasedTrainingPlan`, `activityTypeId`,
     `duration`, `distance`, `calories`, `elapsedDuration`, `averageHR`,
     `maxSpeed`, `isParent`, `lapCount`, `noOfSplits`, `totalAscent`,
-    `climbDuration`, `activeSets`, `hasSplits` (when populated).
+    `climbDuration`, `activeSets`, `recurrenceId` (when populated).
 
     Non-dict inputs (e.g. error stubs from `safe_call`) pass through
     unchanged.

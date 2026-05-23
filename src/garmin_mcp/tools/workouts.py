@@ -112,10 +112,25 @@ def _build_executable_step(spec: dict[str, Any], step_order: int) -> ExecutableS
         # the SDK's declared schema.
         if target_low is None:
             raise ValueError("heart_rate_zone target requires target_low (the zone number 1-5)")
-        zone = int(target_low)
-        if zone < 1 or zone > 5:
+        # `bool` is an `int` subclass — reject explicitly so `True` doesn't
+        # slip through as zone 1. Non-int (float, str) is also rejected:
+        # silently truncating `2.7` to zone 2 would mis-coach the runner.
+        if not isinstance(target_low, int) or isinstance(target_low, bool):
+            raise ValueError(
+                f"heart_rate_zone target_low must be an int 1-5, got {target_low!r}"
+            )
+        if target_low < 1 or target_low > 5:
             raise ValueError(f"heart_rate_zone target_low must be 1-5, got {target_low!r}")
-        step.zoneNumber = zone
+        # HR zones are a single number, not a range. If a caller passes
+        # `target_high` thinking it requests a multi-zone band, fail loudly
+        # rather than silently picking just `target_low`.
+        if target_high is not None and target_high != target_low:
+            raise ValueError(
+                "heart_rate_zone targets a single zone; target_high must equal "
+                f"target_low or be omitted (got target_low={target_low!r}, "
+                f"target_high={target_high!r})"
+            )
+        step.zoneNumber = target_low
     else:
         # `pace_zone` (m/s bounds in targetValueOne/Two) and `cadence`
         # (spm bounds) use a numeric range. `pace_zone` is verified live.
@@ -237,13 +252,16 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                   - `target_type` (optional): `none`, `heart_rate_zone`,
                     `pace_zone`, `cadence`, `open`
                   - `target_low`, `target_high` (optional): numeric bounds.
-                    HR zone uses 1-5 (pass the zone number as `target_low`;
-                    `target_high` is ignored — Garmin renders HR targets
-                    from a single zone number, not a bpm range). Pace zone
-                    uses m/s bounds (verified live). Cadence uses spm bounds
-                    (live-rendering unverified — if it shows as a raw spm
-                    range instead of a zone label, the encoding needs the
-                    same `zoneNumber` treatment as HR)
+                    HR zone uses an integer 1-5 (pass the zone number as
+                    `target_low`; `target_high` must equal `target_low` or
+                    be omitted — Garmin renders HR targets from a single
+                    zone number, not a bpm range, and a mismatched
+                    `target_high` is rejected to catch the "I meant zones
+                    2-4" footgun). Pace zone uses m/s bounds (verified
+                    live). Cadence uses spm bounds (live-rendering
+                    unverified — if it shows as a raw spm range instead of
+                    a zone label, the encoding needs the same `zoneNumber`
+                    treatment as HR)
                   - `description` (optional): freeform note shown on the step
             description: Optional freeform description attached to the
                 workout template.

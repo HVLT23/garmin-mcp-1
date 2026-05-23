@@ -172,6 +172,56 @@ def test_hr_zone_target_rejects_out_of_range(mcp_with_tools) -> None:
     assert result.get("error") == "bad_argument"
 
 
+def test_hr_zone_target_rejects_non_int_target_low(mcp_with_tools) -> None:
+    """A caller passing `target_low=2.7` would silently truncate to zone 2
+    without this guard — a mis-coached step is worse than a loud error.
+    """
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "heart_rate_zone", "target_low": 2.7},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_hr_zone_target_rejects_mismatched_high(mcp_with_tools) -> None:
+    """`target_low=2, target_high=4` looks like "zones 2-4" but Garmin
+    only takes a single zone. Reject loudly rather than silently shipping
+    just zone 2."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 4},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_hr_zone_target_accepts_omitted_high(mcp_with_tools, mock_garmin) -> None:
+    """`target_high` is optional — omitting it is the cleanest call shape
+    now that "must equal or be omitted" is the rule."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "heart_rate_zone", "target_low": 3},
+        ],
+    )
+    assert "error" not in result
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    step = upload_arg.to_dict()["workoutSegments"][0]["workoutSteps"][0]
+    assert step["zoneNumber"] == 3
+
+
 def test_schedule_response_id_field(mcp_with_tools, mock_garmin) -> None:
     """The live Garmin response uses `id` for the scheduled-workout id —
     not `scheduledWorkoutId`. Conftest fixture matches the live shape;
@@ -190,6 +240,27 @@ def test_schedule_response_scheduledworkoutid_field(mcp_with_tools, mock_garmin)
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
     assert result["scheduled_workout_id"] == 999
+
+
+def test_schedule_response_workoutscheduleid_field(mcp_with_tools, mock_garmin) -> None:
+    """Cover the third key in the priority chain so deleting it from
+    `_SCHEDULED_WORKOUT_ID_KEYS` would break a test (otherwise the branch
+    is dead code per coverage)."""
+    mock_garmin.schedule_workout.return_value = {"workoutScheduleId": 555}
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
+    assert result["scheduled_workout_id"] == 555
+
+
+def test_schedule_response_priority_order(mcp_with_tools, mock_garmin) -> None:
+    """When multiple recognised keys are present, `scheduledWorkoutId` wins
+    over `id`. Pins the priority order in `_SCHEDULED_WORKOUT_ID_KEYS` so
+    reordering the tuple (e.g. promoting `id` because it's the live shape)
+    would surface as a regression instead of a silent miscompute."""
+    mock_garmin.schedule_workout.return_value = {"id": 1, "scheduledWorkoutId": 2}
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(date="2026-05-26", name="x", steps=_easy_run_steps())
+    assert result["scheduled_workout_id"] == 2
 
 
 def test_schedule_response_unknown_shape_returns_none(mcp_with_tools, mock_garmin) -> None:
@@ -338,14 +409,16 @@ def test_list_scheduled_workouts_shape(mcp_with_tools, mock_garmin) -> None:
 
 
 def test_list_scheduled_workouts_trims_noise(mcp_with_tools) -> None:
-    """The trim must drop the dive / badge / nap / swim noise fields plus
-    any value that is null on the entry."""
+    """The trim must drop the dive / badge / swim noise fields plus any
+    value that is null on the entry. All assertions here target keys that
+    are only dropped by `_SCHEDULED_WORKOUT_DROP_ALWAYS` — `*Local`
+    suffixes are handled separately by `_strip_pii` and tested elsewhere.
+    """
     fn = get_tool(mcp_with_tools, "list_scheduled_workouts")
     result = fn(year=2026, month=5)
     first = result["calendarItems"][0]
-    # Known-always-null in the live sample — must be stripped.
-    for dropped in ("napStartTimeLocal", "bottomTime", "userBadgeId",
-                    "maxDepth", "shareableEventUuid", "wellnessActivityUuid"):
+    for dropped in ("bottomTime", "userBadgeId", "maxDepth",
+                    "shareableEventUuid", "wellnessActivityUuid", "strokes"):
         assert dropped not in first, f"{dropped!r} should be trimmed"
     # Null-valued fields on this specific entry also drop.
     assert "duration" not in first  # was null on the workout entry
