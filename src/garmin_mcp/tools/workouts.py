@@ -40,14 +40,45 @@ _END_CONDITIONS: dict[str, dict[str, Any]] = {
                 "displayable": True},
 }
 
+# Garmin's `targetType` enum collapses zone-flavored and range-flavored
+# targets under the same id — `heart_rate_zone` and `heart_rate` both ride
+# id 4 / key `heart.rate.zone`; `pace_zone` and `pace` both ride id 5 /
+# key `speed.zone`. The distinction is purely encoding: a zone target
+# emits `step.zoneNumber`, a range target emits `targetValueOne/Two`.
+# Garmin renders them differently on the watch and on Connect ("Zone 2"
+# vs "140-160 bpm"), but the wire-level target-type block is identical.
 _TARGET_TYPES: dict[str, dict[str, Any]] = {
     "none": {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
     "heart_rate_zone": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone",
                         "displayOrder": 4},
+    "heart_rate": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone",
+                   "displayOrder": 4},
     "pace_zone": {"workoutTargetTypeId": 5, "workoutTargetTypeKey": "speed.zone",
                   "displayOrder": 5},
+    "pace": {"workoutTargetTypeId": 5, "workoutTargetTypeKey": "speed.zone",
+             "displayOrder": 5},
     "cadence": {"workoutTargetTypeId": 3, "workoutTargetTypeKey": "cadence", "displayOrder": 3},
     "open": {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "open", "displayOrder": 6},
+}
+
+# Each `target_type` has exactly one valid input shape:
+#   - "zone"  → integer `zone` 1-5; rendered as `step.zoneNumber`
+#   - "range" → numeric `target_low` + `target_high`; rendered as
+#               `targetValueOne/Two` (bpm for HR, m/s for pace, spm for
+#               cadence)
+#   - "none"  → no extra fields
+#
+# `redirect` is the alternative target_type a caller probably meant when
+# they pass the wrong field shape. Surfacing it in the error message lets
+# the LLM self-correct in one shot instead of trial-and-error round-trips.
+_TARGET_SHAPES: dict[str, dict[str, Any]] = {
+    "heart_rate_zone": {"kind": "zone",  "redirect": "heart_rate"},
+    "pace_zone":       {"kind": "zone",  "redirect": "pace"},
+    "heart_rate":      {"kind": "range", "redirect": "heart_rate_zone"},
+    "pace":            {"kind": "range", "redirect": "pace_zone"},
+    "cadence":         {"kind": "range", "redirect": None},
+    "open":            {"kind": "none",  "redirect": None},
+    "none":            {"kind": "none",  "redirect": None},
 }
 
 _STEP_BUILDERS: dict[str, Callable[..., ExecutableStep]] = {
@@ -101,51 +132,94 @@ def _build_executable_step(spec: dict[str, Any], step_order: int) -> ExecutableS
         step.endCondition = dict(_END_CONDITIONS[end_condition])
     step.endConditionValue = end_value
 
-    target_low = spec.get("target_low")
-    target_high = spec.get("target_high")
-    if target == "heart_rate_zone":
-        # Garmin renders HR-zone targets from a single `zoneNumber` (1-5).
-        # Encoding the zone in `targetValueOne/Two` makes Connect treat the
-        # value as a raw bpm range — a recovery step with low=high=2 then
-        # displays as "2-2 bpm" instead of "Zone 2". `extra="allow"` on
-        # `ExecutableStep` lets us set the field even though it isn't in
-        # the SDK's declared schema.
-        if target_low is None:
-            raise ValueError("heart_rate_zone target requires target_low (the zone number 1-5)")
-        # `bool` is an `int` subclass — reject explicitly so `True` doesn't
-        # slip through as zone 1. Non-int (float, str) is also rejected:
-        # silently truncating `2.7` to zone 2 would mis-coach the runner.
-        if not isinstance(target_low, int) or isinstance(target_low, bool):
-            raise ValueError(
-                f"heart_rate_zone target_low must be an int 1-5, got {target_low!r}"
-            )
-        if target_low < 1 or target_low > 5:
-            raise ValueError(f"heart_rate_zone target_low must be 1-5, got {target_low!r}")
-        # HR zones are a single number, not a range. If a caller passes
-        # `target_high` thinking it requests a multi-zone band, fail loudly
-        # rather than silently picking just `target_low`.
-        if target_high is not None and target_high != target_low:
-            raise ValueError(
-                "heart_rate_zone targets a single zone; target_high must equal "
-                f"target_low or be omitted (got target_low={target_low!r}, "
-                f"target_high={target_high!r})"
-            )
-        step.zoneNumber = target_low
-    else:
-        # `pace_zone` (m/s bounds in targetValueOne/Two) and `cadence`
-        # (spm bounds) use a numeric range. `pace_zone` is verified live.
-        # `cadence` is unverified live — if Garmin renders it wrong, this
-        # is the place that needs the zone-number treatment.
-        if target_low is not None:
-            step.targetValueOne = float(target_low)
-        if target_high is not None:
-            step.targetValueTwo = float(target_high)
+    _apply_target(step, target, spec)
 
     description = spec.get("description")
     if description:
         step.description = description
 
     return step
+
+
+def _apply_target(step: ExecutableStep, target: str, spec: dict[str, Any]) -> None:
+    """Validate the spec's target fields against `_TARGET_SHAPES[target]` and
+    set the corresponding attribute(s) on `step`.
+
+    Each target_type has exactly one valid input shape (zone, range, or
+    none). Passing fields that don't belong to the shape is rejected with
+    a message that names the expected fields *and* the target_type the
+    caller probably meant — the redirect hint matters because the LLM
+    will sometimes pick the wrong target_type, and a one-line correction
+    saves a round-trip.
+    """
+    shape = _TARGET_SHAPES[target]
+    kind = shape["kind"]
+    redirect = shape["redirect"]
+    zone = spec.get("zone")
+    target_low = spec.get("target_low")
+    target_high = spec.get("target_high")
+
+    if kind == "zone":
+        if target_low is not None or target_high is not None:
+            hint = (
+                f" Did you mean target_type={redirect!r} for a custom range?"
+                if redirect
+                else ""
+            )
+            raise ValueError(
+                f"target_type={target!r} expects a single 'zone' field (int 1-5); "
+                f"'target_low'/'target_high' are not valid for this target_type.{hint}"
+            )
+        if zone is None:
+            raise ValueError(
+                f"target_type={target!r} requires a 'zone' field (int 1-5)"
+            )
+        # `bool` is an `int` subclass — reject so `True` doesn't slip
+        # through as zone 1. Non-int (float, str) is also rejected:
+        # silently truncating `2.7` to zone 2 would mis-coach the runner.
+        if not isinstance(zone, int) or isinstance(zone, bool):
+            raise ValueError(
+                f"target_type={target!r} 'zone' must be an int 1-5, got {zone!r}"
+            )
+        if zone < 1 or zone > 5:
+            raise ValueError(
+                f"target_type={target!r} 'zone' must be 1-5, got {zone!r}"
+            )
+        step.zoneNumber = zone
+        return
+
+    if kind == "range":
+        if zone is not None:
+            hint = (
+                f" Did you mean target_type={redirect!r} for a zone-based target?"
+                if redirect
+                else ""
+            )
+            raise ValueError(
+                f"target_type={target!r} expects 'target_low' and 'target_high' "
+                f"(numeric range); 'zone' is not valid for this target_type.{hint}"
+            )
+        if target_low is None or target_high is None:
+            raise ValueError(
+                f"target_type={target!r} requires both 'target_low' and "
+                "'target_high' (numeric bounds)"
+            )
+        for label, value in (("target_low", target_low), ("target_high", target_high)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"target_type={target!r} {label!r} must be numeric, got {value!r}"
+                )
+        step.targetValueOne = float(target_low)
+        step.targetValueTwo = float(target_high)
+        return
+
+    # kind == "none": open / no target — reject any stray target fields so
+    # mistakes ("I added a target but didn't change target_type") surface.
+    if zone is not None or target_low is not None or target_high is not None:
+        raise ValueError(
+            f"target_type={target!r} takes no target fields; "
+            "remove 'zone', 'target_low', and 'target_high'"
+        )
 
 
 def _build_steps(
@@ -249,19 +323,21 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                   - `end_condition`: one of `time` (seconds), `distance`
                     (meters), `heart_rate` (bpm), `calories`, `cadence`
                   - `end_value`: numeric value matching `end_condition`
-                  - `target_type` (optional): `none`, `heart_rate_zone`,
-                    `pace_zone`, `cadence`, `open`
-                  - `target_low`, `target_high` (optional): numeric bounds.
-                    HR zone uses an integer 1-5 (pass the zone number as
-                    `target_low`; `target_high` must equal `target_low` or
-                    be omitted — Garmin renders HR targets from a single
-                    zone number, not a bpm range, and a mismatched
-                    `target_high` is rejected to catch the "I meant zones
-                    2-4" footgun). Pace zone uses m/s bounds (verified
-                    live). Cadence uses spm bounds (live-rendering
-                    unverified — if it shows as a raw spm range instead of
-                    a zone label, the encoding needs the same `zoneNumber`
-                    treatment as HR)
+                  - `target_type` (optional, default `none`): selects the
+                    step target shape. Each target_type has exactly one
+                    valid input shape; passing fields from the wrong shape
+                    is rejected with a hint about the right target_type:
+
+                    | target_type       | required fields                  | meaning                              |
+                    | ----------------- | -------------------------------- | ------------------------------------ |
+                    | `heart_rate_zone` | `zone` (int 1-5)                 | run in HR zone N                     |
+                    | `heart_rate`      | `target_low`, `target_high` (bpm)| run in a custom bpm range            |
+                    | `pace_zone`       | `zone` (int 1-5)                 | run in pace zone N                   |
+                    | `pace`            | `target_low`, `target_high` (m/s)| run in a custom m/s pace range       |
+                    | `cadence`         | `target_low`, `target_high` (spm)| run in a custom cadence range (live-render unverified — if it shows as a raw spm range instead of a zone label, this is the place that needs the `zone` treatment) |
+                    | `open`            | (none)                           | open / freeform target               |
+                    | `none`            | (none)                           | no target                            |
+
                   - `description` (optional): freeform note shown on the step
             description: Optional freeform description attached to the
                 workout template.

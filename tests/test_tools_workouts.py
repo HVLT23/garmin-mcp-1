@@ -12,7 +12,7 @@ def _easy_run_steps() -> list[dict]:
     return [
         {"type": "warmup", "end_condition": "time", "end_value": 600},
         {"type": "interval", "end_condition": "time", "end_value": 1800,
-         "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2},
+         "target_type": "heart_rate_zone", "zone": 2},
         {"type": "cooldown", "end_condition": "time", "end_value": 300},
     ]
 
@@ -49,7 +49,7 @@ def test_schedule_running_workout_builds_repeat_group(mcp_with_tools, mock_garmi
                 "iterations": 6,
                 "steps": [
                     {"type": "interval", "end_condition": "distance", "end_value": 800,
-                     "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+                     "target_type": "pace", "target_low": 4.0, "target_high": 4.17},
                     {"type": "recovery", "end_condition": "time", "end_value": 120},
                 ],
             },
@@ -98,7 +98,7 @@ def test_extra_fields_survive_to_dict(mcp_with_tools, mock_garmin) -> None:
         name="With targets",
         steps=[
             {"type": "interval", "end_condition": "distance", "end_value": 800,
-             "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17,
+             "target_type": "pace", "target_low": 4.0, "target_high": 4.17,
              "description": "stay smooth"},
         ],
     )
@@ -111,11 +111,11 @@ def test_extra_fields_survive_to_dict(mcp_with_tools, mock_garmin) -> None:
     assert step["description"] == "stay smooth"
 
 
-def test_hr_zone_target_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
-    """Garmin renders HR-zone targets from a `zoneNumber` field, not a
-    bpm range. Live test: a recovery step with target_low=target_high=2
-    rendered as `2-2 bpm` (raw heart-rate range) when we sent
-    targetValueOne/Two. The fix is to set `zoneNumber` instead.
+def test_heart_rate_zone_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
+    """`heart_rate_zone` is the zone-flavored HR target: takes `zone: int`
+    (1-5) and Garmin renders it as "Zone N". The live test in #26 caught
+    the original bug — using `targetValueOne/Two` for HR-zone made
+    Connect display "2-2 bpm" instead of "Zone 2".
     """
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     fn(
@@ -123,7 +123,7 @@ def test_hr_zone_target_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
         name="HR zone test",
         steps=[
             {"type": "recovery", "end_condition": "time", "end_value": 120,
-             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2},
+             "target_type": "heart_rate_zone", "zone": 2},
         ],
     )
 
@@ -136,44 +136,110 @@ def test_hr_zone_target_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
     assert "targetValueTwo" not in step
 
 
-def test_pace_zone_target_keeps_value_one_two(mcp_with_tools, mock_garmin) -> None:
-    """Regression guard for the HR-zone fix: pace_zone steps must continue
-    to emit raw m/s bounds in targetValueOne/Two (verified live to render
-    correctly as e.g. `4:00-4:10 min/km`).
-    """
+def test_heart_rate_range_emits_target_values(mcp_with_tools, mock_garmin) -> None:
+    """`heart_rate` is the custom-range HR target: takes `target_low` /
+    `target_high` in bpm and emits `targetValueOne/Two`. Same Garmin
+    target-type key as `heart_rate_zone` (`heart.rate.zone`, id 4) — the
+    distinction is the field shape, not the wire enum."""
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     fn(
         date="2026-05-26",
-        name="Pace zone test",
+        name="HR range test",
         steps=[
-            {"type": "interval", "end_condition": "distance", "end_value": 800,
-             "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "heart_rate", "target_low": 140, "target_high": 160},
         ],
     )
 
     upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
     payload = upload_arg.to_dict()
     step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step["targetType"]["workoutTargetTypeKey"] == "heart.rate.zone"
+    assert step["targetValueOne"] == 140.0
+    assert step["targetValueTwo"] == 160.0
+    assert "zoneNumber" not in step
+
+
+def test_pace_zone_emits_zone_number(mcp_with_tools, mock_garmin) -> None:
+    """`pace_zone` is now the zone-flavored pace target (parallel to
+    `heart_rate_zone`): takes `zone: int` and emits `zoneNumber`. The
+    custom m/s range that used to ride under this name is now `pace`."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="Pace zone test",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace_zone", "zone": 4},
+        ],
+    )
+
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    payload = upload_arg.to_dict()
+    step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step.get("zoneNumber") == 4
+    assert step["targetType"]["workoutTargetTypeKey"] == "speed.zone"
+    assert "targetValueOne" not in step
+    assert "targetValueTwo" not in step
+
+
+def test_pace_range_emits_target_values(mcp_with_tools, mock_garmin) -> None:
+    """`pace` is the custom-range pace target: takes `target_low` /
+    `target_high` in m/s and emits `targetValueOne/Two`. This is the
+    shape that was verified live in #26 to render as `4:00-4:10 min/km`."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="Pace range test",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace", "target_low": 4.0, "target_high": 4.17},
+        ],
+    )
+
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    payload = upload_arg.to_dict()
+    step = payload["workoutSegments"][0]["workoutSteps"][0]
+    assert step["targetType"]["workoutTargetTypeKey"] == "speed.zone"
     assert step["targetValueOne"] == 4.0
     assert step["targetValueTwo"] == 4.17
     assert "zoneNumber" not in step
 
 
-def test_hr_zone_target_rejects_out_of_range(mcp_with_tools) -> None:
+def test_cadence_range_emits_target_values(mcp_with_tools, mock_garmin) -> None:
+    """`cadence` is a custom range only (no `cadence_zone` — Garmin
+    doesn't have zone-based cadence)."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    fn(
+        date="2026-05-26",
+        name="Cadence test",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "cadence", "target_low": 170, "target_high": 180},
+        ],
+    )
+    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
+    step = upload_arg.to_dict()["workoutSegments"][0]["workoutSteps"][0]
+    assert step["targetValueOne"] == 170.0
+    assert step["targetValueTwo"] == 180.0
+    assert "zoneNumber" not in step
+
+
+def test_heart_rate_zone_rejects_out_of_range(mcp_with_tools) -> None:
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     result = fn(
         date="2026-05-26",
         name="x",
         steps=[
             {"type": "interval", "end_condition": "time", "end_value": 600,
-             "target_type": "heart_rate_zone", "target_low": 7, "target_high": 7},
+             "target_type": "heart_rate_zone", "zone": 7},
         ],
     )
     assert result.get("error") == "bad_argument"
 
 
-def test_hr_zone_target_rejects_non_int_target_low(mcp_with_tools) -> None:
-    """A caller passing `target_low=2.7` would silently truncate to zone 2
+def test_heart_rate_zone_rejects_non_int_zone(mcp_with_tools) -> None:
+    """A caller passing `zone=2.7` would silently truncate to zone 2
     without this guard — a mis-coached step is worse than a loud error.
     """
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
@@ -182,44 +248,124 @@ def test_hr_zone_target_rejects_non_int_target_low(mcp_with_tools) -> None:
         name="x",
         steps=[
             {"type": "interval", "end_condition": "time", "end_value": 600,
-             "target_type": "heart_rate_zone", "target_low": 2.7},
+             "target_type": "heart_rate_zone", "zone": 2.7},
         ],
     )
     assert result.get("error") == "bad_argument"
 
 
-def test_hr_zone_target_rejects_mismatched_high(mcp_with_tools) -> None:
-    """`target_low=2, target_high=4` looks like "zones 2-4" but Garmin
-    only takes a single zone. Reject loudly rather than silently shipping
-    just zone 2."""
+def test_heart_rate_zone_rejects_target_low_with_redirect(
+    mcp_with_tools, mock_garmin
+) -> None:
+    """Wrong-shape rejection must name the redirect target_type so the LLM
+    can self-correct in one shot. A caller writing
+    `heart_rate_zone` + `target_low: 140` almost certainly meant
+    `heart_rate` (the custom-range variant)."""
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     result = fn(
         date="2026-05-26",
         name="x",
         steps=[
             {"type": "interval", "end_condition": "time", "end_value": 600,
-             "target_type": "heart_rate_zone", "target_low": 2, "target_high": 4},
+             "target_type": "heart_rate_zone", "target_low": 140, "target_high": 160},
         ],
     )
     assert result.get("error") == "bad_argument"
+    assert "heart_rate" in result["message"]
+    mock_garmin.upload_running_workout.assert_not_called()
 
 
-def test_hr_zone_target_accepts_omitted_high(mcp_with_tools, mock_garmin) -> None:
-    """`target_high` is optional — omitting it is the cleanest call shape
-    now that "must equal or be omitted" is the rule."""
+def test_heart_rate_range_rejects_zone_with_redirect(mcp_with_tools) -> None:
+    """Mirror redirect: `heart_rate` + `zone` should suggest
+    `heart_rate_zone`."""
     fn = get_tool(mcp_with_tools, "schedule_running_workout")
     result = fn(
         date="2026-05-26",
         name="x",
         steps=[
             {"type": "interval", "end_condition": "time", "end_value": 600,
-             "target_type": "heart_rate_zone", "target_low": 3},
+             "target_type": "heart_rate", "zone": 2},
         ],
     )
-    assert "error" not in result
-    upload_arg = mock_garmin.upload_running_workout.call_args.args[0]
-    step = upload_arg.to_dict()["workoutSegments"][0]["workoutSteps"][0]
-    assert step["zoneNumber"] == 3
+    assert result.get("error") == "bad_argument"
+    assert "heart_rate_zone" in result["message"]
+
+
+def test_pace_zone_rejects_target_low_with_redirect(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+    # Must mention `pace` as the redirect; just substring on the slug to
+    # avoid coupling to exact phrasing. `pace_zone` is the input, so
+    # finding a bare `'pace'` token requires asserting on the redirect
+    # form specifically.
+    assert "'pace'" in result["message"]
+
+
+def test_pace_range_rejects_zone_with_redirect(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace", "zone": 4},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+    assert "pace_zone" in result["message"]
+
+
+def test_pace_range_requires_both_bounds(mcp_with_tools) -> None:
+    """Range targets need both endpoints. Missing one is a loud error."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "distance", "end_value": 800,
+             "target_type": "pace", "target_low": 4.0},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+
+
+def test_cadence_rejects_no_redirect_hint(mcp_with_tools) -> None:
+    """`cadence` has no zone variant — the error should NOT suggest one
+    (no `cadence_zone` to redirect to)."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "cadence", "zone": 2},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
+    assert "Did you mean" not in result["message"]
+
+
+def test_open_rejects_stray_zone(mcp_with_tools) -> None:
+    """`open` / `none` take no target fields; stray values surface as
+    'I added a target but forgot to change target_type' mistakes."""
+    fn = get_tool(mcp_with_tools, "schedule_running_workout")
+    result = fn(
+        date="2026-05-26",
+        name="x",
+        steps=[
+            {"type": "interval", "end_condition": "time", "end_value": 600,
+             "target_type": "open", "zone": 2},
+        ],
+    )
+    assert result.get("error") == "bad_argument"
 
 
 def test_schedule_response_id_field(mcp_with_tools, mock_garmin) -> None:

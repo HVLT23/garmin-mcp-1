@@ -158,18 +158,31 @@ Non-repeat step fields:
 | -------------- | --------------------------------------------------------------------------------- |
 | `end_condition`| `time` (seconds), `distance` (meters), `heart_rate` (bpm), `calories`, `cadence`  |
 | `end_value`    | numeric — interpreted per `end_condition`                                         |
-| `target_type`  | `none`, `heart_rate_zone`, `pace_zone`, `cadence`, `open` (optional, default `none`) |
-| `target_low`   | numeric lower bound for the target (HR zone 1–5; pace in m/s; cadence in spm)     |
-| `target_high`  | numeric upper bound for the target                                                |
+| `target_type`  | one of the seven values below (optional, default `none`)                          |
+| `zone`         | integer 1–5; required when `target_type` is a `*_zone` variant                    |
+| `target_low`   | numeric lower bound; required when `target_type` is a range variant               |
+| `target_high`  | numeric upper bound; required when `target_type` is a range variant               |
 | `description`  | freeform note attached to the step (optional)                                     |
 
-Target encoding has been verified against Garmin Connect: `heart_rate_zone` uses a single
-zone number (pass `target_low` 1–5; `target_high` is ignored), `pace_zone` uses raw m/s
-bounds (verified live). `cadence` encoding is **unverified live** — if Garmin renders a
-cadence target as a raw spm range instead of a zone label, it likely needs the same
-zone-number treatment as HR.
+Each `target_type` has exactly one valid input shape. Passing fields from the wrong shape
+is rejected with a `bad_argument` error that names the target_type you probably meant:
 
-#### Example 1 — easy run
+| `target_type`     | required fields                          | meaning                            |
+| ----------------- | ---------------------------------------- | ---------------------------------- |
+| `heart_rate_zone` | `zone` (int 1–5)                         | run in HR zone N                   |
+| `heart_rate`      | `target_low`, `target_high` (bpm)        | run in a custom bpm range          |
+| `pace_zone`       | `zone` (int 1–5)                         | run in pace zone N                 |
+| `pace`            | `target_low`, `target_high` (m/s)        | run in a custom m/s pace range     |
+| `cadence`         | `target_low`, `target_high` (spm)        | run in a custom cadence range      |
+| `open`            | _(none)_                                 | open / freeform target             |
+| `none`            | _(none)_                                 | no target                          |
+
+HR-zone and pace-zone encodings (single `zoneNumber` on the wire), HR-range and pace-range
+encodings (`targetValueOne/Two` in bpm and m/s respectively) are all verified live against
+Garmin Connect. `cadence` is **unverified live** — if Garmin renders a cadence target as
+a raw spm range instead of a zone label, it likely needs the same `zone` treatment as HR.
+
+#### Example 1 — easy run (HR zone)
 
 10-min warmup, 30 min easy in HR zone 2, 5-min cooldown:
 
@@ -180,13 +193,13 @@ schedule_running_workout(
     steps=[
         {"type": "warmup",   "end_condition": "time", "end_value": 600},
         {"type": "interval", "end_condition": "time", "end_value": 1800,
-         "target_type": "heart_rate_zone", "target_low": 2, "target_high": 2},
+         "target_type": "heart_rate_zone", "zone": 2},
         {"type": "cooldown", "end_condition": "time", "end_value": 300},
     ],
 )
 ```
 
-#### Example 2 — interval session
+#### Example 2 — interval session (custom pace range)
 
 10-min warmup, 6× (800 m at 4:00–4:10 / km pace + 2 min jog recovery), 5-min cooldown.
 Pace targets are in metres per second: 4:00/km = 1000 / 240 ≈ 4.17 m/s,
@@ -203,10 +216,44 @@ schedule_running_workout(
             "iterations": 6,
             "steps": [
                 {"type": "interval", "end_condition": "distance", "end_value": 800,
-                 "target_type": "pace_zone", "target_low": 4.0, "target_high": 4.17},
+                 "target_type": "pace", "target_low": 4.0, "target_high": 4.17},
                 {"type": "recovery", "end_condition": "time", "end_value": 120},
             ],
         },
+        {"type": "cooldown", "end_condition": "time", "end_value": 300},
+    ],
+)
+```
+
+#### Example 3 — tempo at a custom HR range
+
+20-min warmup, 30 min at 150–165 bpm, 10-min cooldown:
+
+```python
+schedule_running_workout(
+    date="2026-05-30",
+    name="Tempo @ HR 150–165",
+    steps=[
+        {"type": "warmup",   "end_condition": "time", "end_value": 1200},
+        {"type": "interval", "end_condition": "time", "end_value": 1800,
+         "target_type": "heart_rate", "target_low": 150, "target_high": 165},
+        {"type": "cooldown", "end_condition": "time", "end_value": 600},
+    ],
+)
+```
+
+#### Example 4 — pace zone
+
+5-min warmup, 10 min in pace zone 4, 5-min cooldown:
+
+```python
+schedule_running_workout(
+    date="2026-05-31",
+    name="Zone 4 pace",
+    steps=[
+        {"type": "warmup",   "end_condition": "time", "end_value": 300},
+        {"type": "interval", "end_condition": "time", "end_value": 600,
+         "target_type": "pace_zone", "zone": 4},
         {"type": "cooldown", "end_condition": "time", "end_value": 300},
     ],
 )
