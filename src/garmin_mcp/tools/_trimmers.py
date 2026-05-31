@@ -1671,3 +1671,80 @@ def trim_scheduled_workouts(payload: Any) -> Any:
     trimmed_items = [_trim_scheduled_workout_item(item) for item in items]
     out = {**payload, "calendarItems": trimmed_items}
     return _strip_pii(out)
+
+
+# `get_workout` / `list_workouts` return the workout-template DTO(s). Three
+# kinds of noise dominate these payloads, all safe to drop everywhere they
+# appear — top level *and* nested inside every step:
+#   - `author`: an empty `{}` on user-authored workouts (and, on list items,
+#     a thin profile stub); never carries anything the LLM reasons over.
+#   - `strokeType` / `equipmentType`: per-step swim / gear enums that are the
+#     all-zero default (`{...TypeId: 0}`) on every running step.
+#   - `displayOrder` / `displayable`: UI sort / render hints baked into each
+#     `sportType` / `stepType` / `endCondition` / `targetType` enum block —
+#     repeated 4+ times per step, never analytically meaningful.
+# Owner identity (`ownerId`, …) is dropped by the shared `_strip_pii` pass.
+_WORKOUT_DROP_ALWAYS = frozenset(
+    {
+        "author",
+        "strokeType",
+        "equipmentType",
+        "displayOrder",
+        "displayable",
+    }
+)
+
+
+def _trim_workout_node(obj: Any) -> Any:
+    """Recursively drop `_WORKOUT_DROP_ALWAYS` keys at every nesting level.
+
+    Workout DTOs nest the same noise enums inside `workoutSegments[] ->
+    workoutSteps[] -> (nested repeat groups) -> ...`, so the drop has to
+    recurse rather than touch only the top level. The load-bearing step
+    fields — targets (`targetValueOne/Two`, `zoneNumber`), end conditions,
+    and the repeat structure (`numberOfIterations`, `workoutSteps`) — are
+    preserved.
+    """
+    if isinstance(obj, dict):
+        if "error" in obj:
+            return obj
+        return {
+            k: _trim_workout_node(v)
+            for k, v in obj.items()
+            if k not in _WORKOUT_DROP_ALWAYS
+        }
+    if isinstance(obj, list):
+        return [_trim_workout_node(item) for item in obj]
+    return obj
+
+
+def trim_workout(payload: Any) -> Any:
+    """Trim a single workout-template DTO from `get_workout`.
+
+    Drops the per-step `strokeType` / `equipmentType` defaults, the
+    `displayOrder` / `displayable` UI hints on every enum block, and the
+    empty `author` object, then strips owner identity via `_strip_pii`.
+    Retained: `workoutId`, `workoutName`, `sportType`, the created / updated
+    dates, `estimatedDurationInSecs`, and the full `workoutSegments` step
+    tree (step types, end conditions, targets, repeat groups).
+
+    Non-dict inputs (e.g. `safe_call` error stubs) pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if "error" in payload:
+        return payload
+    return _strip_pii(_trim_workout_node(payload))
+
+
+def trim_workouts(payload: Any) -> Any:
+    """Trim the workout-library list from `list_workouts`.
+
+    The upstream `GET /workout-service/workouts` response is a list of
+    workout-template DTOs (same shape as `get_workout`); each item is
+    trimmed with the same rules as `trim_workout`. Non-list inputs (e.g.
+    error stubs) pass through unchanged.
+    """
+    if not isinstance(payload, list):
+        return payload
+    return [trim_workout(item) for item in payload]

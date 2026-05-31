@@ -1,0 +1,171 @@
+{
+  "workoutId": 1055637,
+  "ownerId": 10788552,
+  "workoutName": "Tempo 6x800",
+  "updatedDate": "2026-05-08T09:14:50.0",
+  "createdDate": "2026-05-08T09:14:50.0",
+  "sportType": {
+    "sportTypeId": 1,
+    "sportTypeKey": "running",
+    "displayOrder": 1
+  },
+  "author": {},
+  "estimatedDurationInSecs": 1200,
+  "workoutSegments": [
+    {
+      "segmentOrder": 1,
+      "sportType": {
+        "sportTypeId": 1,
+        "sportTypeKey": "running",
+        "displayOrder": 1
+      },
+      "workoutSteps": [
+        {
+          "type": "ExecutableStepDTO",
+          "stepId": 633927266,
+          "stepOrder": 1,
+          "stepType": {
+            "stepTypeId": 1,
+            "stepTypeKey": "warmup",
+            "displayOrder": 1
+          },
+          "endCondition": {
+            "conditionTypeId": 2,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": true
+          },
+          "endConditionValue": 600.0,
+          "targetType": {
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1
+          },
+          "strokeType": {
+            "strokeTypeId": 0,
+            "displayOrder": 0
+          },
+          "equipmentType": {
+            "equipmentTypeId": 0,
+            "displayOrder": 0
+          }
+        },
+        {
+          "type": "RepeatGroupDTO",
+          "stepId": 633927267,
+          "stepOrder": 2,
+          "stepType": {
+            "stepTypeId": 6,
+            "stepTypeKey": "repeat",
+            "displayOrder": 6
+          },
+          "childStepId": 1,
+          "numberOfIterations": 6,
+          "workoutSteps": [
+            {
+              "type": "ExecutableStepDTO",
+              "stepId": 705526052,
+              "stepOrder": 3,
+              "stepType": {
+                "stepTypeId": 3,
+                "stepTypeKey": "interval",
+                "displayOrder": 3
+              },
+              "endCondition": {
+                "conditionTypeId": 1,
+                "conditionTypeKey": "distance",
+                "displayOrder": 1,
+                "displayable": true
+              },
+              "endConditionValue": 800.0,
+              "targetType": {
+                "workoutTargetTypeId": 5,
+                "workoutTargetTypeKey": "speed.zone",
+                "displayOrder": 5
+              },
+              "targetValueOne": 4.0,
+              "targetValueTwo": 4.17,
+              "strokeType": {
+                "strokeTypeId": 0,
+                "displayOrder": 0
+              },
+              "equipmentType": {
+                "equipmentTypeId": 0,
+                "displayOrder": 0
+              }
+            },
+            {
+              "type": "ExecutableStepDTO",
+              "stepId": 705526053,
+              "stepOrder": 4,
+              "stepType": {
+                "stepTypeId": 4,
+                "stepTypeKey": "recovery",
+                "displayOrder": 4
+              },
+              "endCondition": {
+                "conditionTypeId": 2,
+                "conditionTypeKey": "time",
+                "displayOrder": 2,
+                "displayable": true
+              },
+              "endConditionValue": 120.0,
+              "targetType": {
+                "workoutTargetTypeId": 4,
+                "workoutTargetTypeKey": "heart.rate.zone",
+                "displayOrder": 4
+              },
+              "zoneNumber": 2,
+              "strokeType": {
+                "strokeTypeId": 0,
+                "displayOrder": 0
+              },
+              "equipmentType": {
+                "equipmentTypeId": 0,
+                "displayOrder": 0
+              }
+            }
+          ],
+          "endConditionValue": 6.0,
+          "endCondition": {
+            "conditionTypeId": 7,
+            "conditionTypeKey": "iterations",
+            "displayOrder": 7,
+            "displayable": false
+          },
+          "smartRepeat": false
+        },
+        {
+          "type": "ExecutableStepDTO",
+          "stepId": 633927273,
+          "stepOrder": 5,
+          "stepType": {
+            "stepTypeId": 2,
+            "stepTypeKey": "cooldown",
+            "displayOrder": 2
+          },
+          "endCondition": {
+            "conditionTypeId": 2,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": true
+          },
+          "endConditionValue": 300.0,
+          "targetType": {
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1
+          },
+          "strokeType": {
+            "strokeTypeId": 0,
+            "displayOrder": 0
+          },
+          "equipmentType": {
+            "equipmentTypeId": 0,
+            "displayOrder": 0
+          }
+        }
+      ]
+    }
+  ]
+}

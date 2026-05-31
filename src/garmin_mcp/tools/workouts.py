@@ -1,4 +1,4 @@
-"""Workout MCP tools (write surface — schedule structured running workouts)."""
+"""Workout MCP tools — read the workout library and schedule structured running workouts."""
 
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ from garminconnect.workout import (
 )
 from mcp.server.fastmcp import FastMCP
 
+from garmin_mcp.cache import TTL_WORKOUT, TTL_WORKOUT_LIST, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
-from garmin_mcp.tools._trimmers import trim_scheduled_workouts
+from garmin_mcp.tools._trimmers import trim_scheduled_workouts, trim_workout, trim_workouts
 
 ClientFactory = Callable[[], Garmin]
 
@@ -444,3 +445,71 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         """
         full = client_factory().get_scheduled_workouts(year, month)
         return full if verbose else trim_scheduled_workouts(full)
+
+    # Cached fetcher for the raw workout-library list. The cache lives
+    # *before* trimming so a verbose=True call after a verbose=False call
+    # hits the cache rather than re-fetching — same pattern as the activity
+    # tools.
+    @cached(ttl=TTL_WORKOUT_LIST)
+    def _fetch_workouts(limit: int, start: int) -> list[dict[str, Any]]:
+        return client_factory().get_workouts(start, limit) or []
+
+    @mcp.tool()
+    @audited
+    @safe_call
+    def list_workouts(limit: int = 20, start: int = 0, verbose: bool = False) -> Any:
+        """List the workout templates in the user's library, newest first.
+
+        These are the saved workouts (the `workout_id` side), independent of
+        whether they're placed on the calendar — use `list_scheduled_workouts`
+        for calendar scheduling. Pass a returned `workoutId` to `get_workout`
+        for the full step breakdown, or to `delete_workout` to remove it.
+
+        By default (verbose=False) each template is trimmed of the per-step
+        `strokeType` / `equipmentType` defaults, the `displayOrder` /
+        `displayable` UI hints on every enum block, the empty `author`
+        object, and owner identity. The analytical signal — name, sport,
+        estimated duration, created / updated dates, and the full step tree —
+        is retained.
+
+        Pass verbose=True to get the un-modified upstream payload. The cache
+        stores the full upstream regardless, so a later verbose=True call
+        hits the cache rather than re-fetching.
+
+        Args:
+            limit: Number of templates to return (default 20).
+            start: Pagination offset (default 0).
+            verbose: If True, return the full upstream payload (default False).
+        """
+        full = _fetch_workouts(limit, start)
+        return full if verbose else trim_workouts(full)
+
+    # Cached fetcher for a single raw workout-template payload.
+    @cached(ttl=TTL_WORKOUT)
+    def _fetch_workout(workout_id: int) -> dict[str, Any]:
+        return client_factory().get_workout_by_id(workout_id)
+
+    @mcp.tool()
+    @audited
+    @safe_call
+    def get_workout(workout_id: int, verbose: bool = False) -> Any:
+        """Fetch a single workout template by ID, including its full step tree.
+
+        Takes `workout_id` (the template id returned by
+        `schedule_running_workout` and `list_workouts`, or the `workoutId`
+        field of `list_scheduled_workouts`), NOT `scheduled_workout_id`.
+
+        By default (verbose=False) the response is trimmed of the per-step
+        `strokeType` / `equipmentType` defaults, the `displayOrder` /
+        `displayable` UI hints on every enum block, the empty `author`
+        object, and owner identity. Retained: `workoutId`, `workoutName`,
+        `sportType`, `estimatedDurationInSecs`, the created / updated dates,
+        and the full `workoutSegments` step tree (step types, end
+        conditions, targets, repeat groups).
+
+        Pass verbose=True to get the un-modified upstream payload. The cache
+        stores the full upstream regardless, so a later verbose=True call
+        hits the cache rather than re-fetching.
+        """
+        full = _fetch_workout(workout_id)
+        return full if verbose else trim_workout(full)

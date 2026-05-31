@@ -579,3 +579,91 @@ def test_list_scheduled_workouts_verbose_returns_untrimmed(mcp_with_tools) -> No
     assert "napStartTimeLocal" in first
     assert "bottomTime" in first
     assert "userBadgeId" in first
+
+
+def test_list_workouts_shape(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "list_workouts")
+    result = fn()
+    # Defaults forwarded to the SDK in (start, limit) order.
+    mock_garmin.get_workouts.assert_called_once_with(0, 20)
+    assert isinstance(result, list)
+    assert len(result) == 2
+    first = result[0]
+    assert first["workoutId"] == 1055637
+    assert first["workoutName"] == "Tempo 6x800"
+    assert first["sportType"]["sportTypeKey"] == "running"
+
+
+def test_list_workouts_pagination_args(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "list_workouts")
+    fn(limit=50, start=10)
+    mock_garmin.get_workouts.assert_called_once_with(10, 50)
+
+
+def test_list_workouts_trims_noise_and_owner(mcp_with_tools) -> None:
+    """`author` (plus the PII nested inside it), `ownerId`, and the
+    `displayOrder` UI hint drop on every list item."""
+    fn = get_tool(mcp_with_tools, "list_workouts")
+    result = fn()
+    first = result[0]
+    assert "author" not in first
+    assert "ownerId" not in first
+    assert "displayOrder" not in first["sportType"]
+
+
+def test_list_workouts_verbose_returns_untrimmed(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "list_workouts")
+    result = fn(verbose=True)
+    first = result[0]
+    assert first["ownerId"] == 10788552
+    assert "author" in first
+    assert first["sportType"]["displayOrder"] == 1
+
+
+def test_get_workout_shape(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "get_workout")
+    result = fn(workout_id=1055637)
+    mock_garmin.get_workout_by_id.assert_called_once_with(1055637)
+    assert result["workoutId"] == 1055637
+    assert result["workoutName"] == "Tempo 6x800"
+    steps = result["workoutSegments"][0]["workoutSteps"]
+    # warmup, repeat group, cooldown
+    assert len(steps) == 3
+    assert steps[1]["type"] == "RepeatGroupDTO"
+    assert steps[1]["numberOfIterations"] == 6
+
+
+def test_get_workout_preserves_targets(mcp_with_tools) -> None:
+    """The trim must never strip per-step target encoding — that's the
+    analytical payload. Both the range (`targetValueOne/Two`) and zone
+    (`zoneNumber`) shapes survive, nested inside the repeat group."""
+    fn = get_tool(mcp_with_tools, "get_workout")
+    result = fn(workout_id=1055637)
+    interval, recovery = result["workoutSegments"][0]["workoutSteps"][1]["workoutSteps"]
+    assert interval["targetValueOne"] == 4.0
+    assert interval["targetValueTwo"] == 4.17
+    assert recovery["zoneNumber"] == 2
+    assert recovery["targetType"]["workoutTargetTypeKey"] == "heart.rate.zone"
+
+
+def test_get_workout_trims_noise_and_owner(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "get_workout")
+    result = fn(workout_id=1055637)
+    assert "ownerId" not in result
+    assert "author" not in result
+    warmup = result["workoutSegments"][0]["workoutSteps"][0]
+    # Per-step swim / gear defaults drop.
+    assert "strokeType" not in warmup
+    assert "equipmentType" not in warmup
+    # UI hints drop even inside nested enum blocks.
+    assert "displayOrder" not in warmup["stepType"]
+    assert "displayable" not in warmup["endCondition"]
+
+
+def test_get_workout_verbose_returns_untrimmed(mcp_with_tools) -> None:
+    fn = get_tool(mcp_with_tools, "get_workout")
+    result = fn(workout_id=1055637, verbose=True)
+    assert result["ownerId"] == 10788552
+    warmup = result["workoutSegments"][0]["workoutSteps"][0]
+    assert "strokeType" in warmup
+    assert warmup["stepType"]["displayOrder"] == 1
