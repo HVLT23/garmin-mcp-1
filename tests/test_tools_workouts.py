@@ -5,7 +5,7 @@ from __future__ import annotations
 from garminconnect import GarminConnectTooManyRequestsError
 from garminconnect.workout import RepeatGroup, RunningWorkout
 
-from tests.conftest import get_tool
+from tests.conftest import get_tool, load_fixture
 
 
 def _easy_run_steps() -> list[dict]:
@@ -667,3 +667,51 @@ def test_get_workout_verbose_returns_untrimmed(mcp_with_tools) -> None:
     warmup = result["workoutSegments"][0]["workoutSteps"][0]
     assert "strokeType" in warmup
     assert warmup["stepType"]["displayOrder"] == 1
+
+
+def test_list_workouts_cache_persists_full_upstream(
+    mcp_with_tools, mock_garmin, monkeypatch
+) -> None:
+    """A verbose=True call after a verbose=False call hits the cache."""
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("workouts_list")
+    mock_garmin.get_workouts.return_value = full
+
+    fn = get_tool(mcp_with_tools, "list_workouts")
+
+    trimmed = fn()
+    verbose = fn(verbose=True)
+
+    assert mock_garmin.get_workouts.call_count == 1
+    assert verbose == full
+    assert "ownerId" not in trimmed[0]
+    assert "ownerId" in verbose[0]
+
+    cache.clear_all()
+
+
+def test_get_workout_cache_persists_full_upstream(
+    mcp_with_tools, mock_garmin, monkeypatch
+) -> None:
+    from garmin_mcp import cache
+
+    monkeypatch.delenv("GARMIN_MCP_NO_CACHE", raising=False)
+    cache.clear_all()
+
+    full = load_fixture("workout_detail")
+    mock_garmin.get_workout_by_id.return_value = full
+
+    fn = get_tool(mcp_with_tools, "get_workout")
+    trimmed = fn(workout_id=1055637)
+    verbose = fn(workout_id=1055637, verbose=True)
+
+    assert mock_garmin.get_workout_by_id.call_count == 1
+    assert verbose == full
+    assert "ownerId" not in trimmed
+    assert "ownerId" in verbose
+
+    cache.clear_all()

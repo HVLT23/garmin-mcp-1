@@ -510,6 +510,12 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         Pass verbose=True to get the un-modified upstream payload. The cache
         stores the full upstream regardless, so a later verbose=True call
         hits the cache rather than re-fetching.
+
+        Args:
+            workout_id: Template id (returned by `schedule_running_workout`
+                / `list_workouts`, or the `workoutId` field of
+                `list_scheduled_workouts`).
+            verbose: If True, return the full upstream payload (default False).
         """
         full = _fetch_workout(workout_id)
         return full if verbose else trim_workout(full)
