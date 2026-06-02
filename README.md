@@ -120,6 +120,15 @@ Garmin state. Date arguments are ISO `YYYY-MM-DD`; date-defaulted tools fall bac
   load. The "prior night" date is derived from the activity's start time (if it began before
   04:00, the prior night = night of the day before yesterday).
 
+### Workouts (library)
+
+- `list_workouts(limit, start, verbose=False)` — list saved workout templates (the
+  `workout_id` side), newest first. Read-only. Trimmed by default; `verbose=True` for the
+  un-modified upstream payload.
+- `get_workout(workout_id, verbose=False)` — full step breakdown for a single template
+  (step types, end conditions, targets, repeat groups). Takes `workout_id`, not
+  `scheduled_workout_id`. Read-only, trimmed by default.
+
 ### Write tools (running workouts)
 
 These tools hit Garmin's unofficial workout endpoints. The endpoints have no SLA, no

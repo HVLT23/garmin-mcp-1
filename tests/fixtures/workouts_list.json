@@ -1,0 +1,34 @@
+[
+  {
+    "workoutId": 1055637,
+    "ownerId": 10788552,
+    "workoutName": "Tempo 6x800",
+    "updatedDate": "2026-05-08T09:14:50.0",
+    "createdDate": "2026-05-08T09:14:50.0",
+    "sportType": {
+      "sportTypeId": 1,
+      "sportTypeKey": "running",
+      "displayOrder": 1
+    },
+    "estimatedDurationInSecs": 1200,
+    "author": {
+      "userProfilePk": 10788552,
+      "displayName": "tester",
+      "profileImageUrlLarge": "https://example.com/avatar.png"
+    }
+  },
+  {
+    "workoutId": 1055700,
+    "ownerId": 10788552,
+    "workoutName": "Easy 40min",
+    "updatedDate": "2026-05-09T07:00:00.0",
+    "createdDate": "2026-05-09T07:00:00.0",
+    "sportType": {
+      "sportTypeId": 1,
+      "sportTypeKey": "running",
+      "displayOrder": 1
+    },
+    "estimatedDurationInSecs": 2400,
+    "author": {}
+  }
+]

@@ -60,6 +60,8 @@ def mock_garmin() -> MagicMock:
     m.unschedule_workout.return_value = {"status": "ok"}
     m.delete_workout.return_value = {"status": "ok"}
     m.get_scheduled_workouts.return_value = load_fixture("scheduled_workouts")
+    m.get_workouts.return_value = load_fixture("workouts_list")
+    m.get_workout_by_id.return_value = load_fixture("workout_detail")
 
     m.get_full_name.return_value = "Test User"
     return m
