@@ -18,7 +18,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8000
 USER mcp
-VOLUME ["/data/tokens"]
 EXPOSE 8000
 # Container-level healthcheck against the unauthenticated /healthz route.
 # Fly.io has its own HTTP healthcheck wired up in fly.toml; this is for
