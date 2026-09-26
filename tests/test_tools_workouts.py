@@ -715,3 +715,181 @@ def test_get_workout_cache_persists_full_upstream(
     assert "ownerId" in verbose
 
     cache.clear_all()
+
+
+# ---------------------------------------------------------------------------
+# schedule_strength_workout
+# ---------------------------------------------------------------------------
+
+
+def _squat_steps() -> list[dict]:
+    return [
+        {"type": "warmup", "duration_seconds": 600, "description": "Montée en charge"},
+        {"type": "exercise", "sets": 4, "reps": 5, "rest_seconds": 180,
+         "weight_kg": 100, "category": "SQUAT", "exercise_name": "BARBELL_BACK_SQUAT",
+         "description": "Dos gainé"},
+        {"type": "exercise", "sets": 3, "duration_seconds": 45, "rest_seconds": 60,
+         "category": "PLANK", "exercise_name": "PLANK"},
+        {"type": "exercise", "reps": 20, "description": "Wall balls"},
+        {"type": "cooldown", "duration_seconds": 300},
+    ]
+
+
+def test_schedule_strength_workout_uploads_and_schedules(mcp_with_tools, mock_garmin) -> None:
+    mock_garmin.upload_workout.return_value = {"workoutId": 555}
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    result = fn(date="2026-10-01", name="Force bas du corps", steps=_squat_steps(),
+                description="Séance force")
+
+    assert result == {
+        "workout_id": 555,
+        "scheduled_workout_id": 111222333,
+        "date": "2026-10-01",
+        "name": "Force bas du corps",
+        "exercise_keys_dropped": False,
+    }
+    mock_garmin.schedule_workout.assert_called_once_with(555, "2026-10-01")
+
+    payload = mock_garmin.upload_workout.call_args.args[0]
+    assert payload["sportType"]["sportTypeId"] == 5
+    assert payload["sportType"]["sportTypeKey"] == "strength_training"
+    assert payload["description"] == "Séance force"
+    segment = payload["workoutSegments"][0]
+    assert segment["sportType"]["sportTypeKey"] == "strength_training"
+    steps = segment["workoutSteps"]
+
+    warmup = steps[0]
+    assert warmup["stepType"]["stepTypeKey"] == "warmup"
+    assert warmup["endCondition"]["conditionTypeId"] == 2
+    assert warmup["endConditionValue"] == 600.0
+
+    squat_group = steps[1]
+    assert squat_group["type"] == "RepeatGroupDTO"
+    assert squat_group["stepType"]["stepTypeId"] == 6
+    assert squat_group["numberOfIterations"] == 4
+    assert squat_group["endCondition"]["conditionTypeId"] == 7
+    assert squat_group["skipLastRestStep"] is True
+    squat, rest = squat_group["workoutSteps"]
+    assert squat["stepType"]["stepTypeId"] == 3
+    assert squat["endCondition"]["conditionTypeId"] == 10
+    assert squat["endCondition"]["conditionTypeKey"] == "reps"
+    assert squat["endConditionValue"] == 5.0
+    assert squat["category"] == "SQUAT"
+    assert squat["exerciseName"] == "BARBELL_BACK_SQUAT"
+    assert squat["weightValue"] == 100.0
+    assert squat["weightUnit"] == {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
+    assert squat["description"] == "Dos gainé"
+    assert rest["stepType"]["stepTypeId"] == 5
+    assert rest["endConditionValue"] == 180.0
+
+    plank = steps[2]["workoutSteps"][0]
+    assert plank["endCondition"]["conditionTypeKey"] == "time"
+    assert plank["endConditionValue"] == 45.0
+
+    single = steps[3]
+    assert single["type"] == "ExecutableStepDTO"
+    assert single["endConditionValue"] == 20.0
+    assert "category" not in single
+
+    assert steps[4]["stepType"]["stepTypeKey"] == "cooldown"
+
+    # Step orders are unique and increasing, children numbered after parents.
+    orders = [steps[0]["stepOrder"], steps[1]["stepOrder"],
+              *[s["stepOrder"] for s in steps[1]["workoutSteps"]],
+              steps[2]["stepOrder"],
+              *[s["stepOrder"] for s in steps[2]["workoutSteps"]],
+              steps[3]["stepOrder"], steps[4]["stepOrder"]]
+    assert orders == list(range(1, len(orders) + 1))
+
+    # warmup 600 + squat rests 3 x 180 (no rest after the last set)
+    # + plank 3 x 45 + 2 x 60 + cooldown 300; reps steps count 0.
+    assert payload["estimatedDurationInSecs"] == 600 + 3 * 180 + 3 * 45 + 2 * 60 + 300
+
+
+def test_schedule_strength_workout_retries_without_exercise_keys(
+    mcp_with_tools, mock_garmin
+) -> None:
+    from garminconnect import GarminConnectConnectionError
+
+    mock_garmin.upload_workout.side_effect = [
+        GarminConnectConnectionError("400 Invalid category"),
+        {"workoutId": 777},
+    ]
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    result = fn(date="2026-10-01", name="Force", steps=_squat_steps())
+
+    assert result["workout_id"] == 777
+    assert result["exercise_keys_dropped"] is True
+    assert mock_garmin.upload_workout.call_count == 2
+    retry = mock_garmin.upload_workout.call_args_list[1].args[0]
+    squat = retry["workoutSegments"][0]["workoutSteps"][1]["workoutSteps"][0]
+    assert "category" not in squat
+    assert "exerciseName" not in squat
+    # Everything else is preserved on the retry.
+    assert squat["weightValue"] == 100.0
+    assert squat["description"] == "Dos gainé"
+
+
+def test_schedule_strength_workout_no_retry_without_exercise_keys(
+    mcp_with_tools, mock_garmin
+) -> None:
+    from garminconnect import GarminConnectConnectionError
+
+    mock_garmin.upload_workout.side_effect = GarminConnectConnectionError("boom")
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    result = fn(date="2026-10-01", name="Force",
+                steps=[{"type": "exercise", "sets": 3, "reps": 10}])
+
+    assert result["error"] == "garmin_unreachable"
+    assert mock_garmin.upload_workout.call_count == 1
+    mock_garmin.schedule_workout.assert_not_called()
+
+
+def test_schedule_strength_workout_rejects_unknown_category(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    result = fn(date="2026-10-01", name="Force",
+                steps=[{"type": "exercise", "reps": 10, "category": "SLED"}])
+    assert result["error"] == "bad_argument"
+    assert "unknown category" in result["message"]
+    mock_garmin.upload_workout.assert_not_called()
+
+
+def test_schedule_strength_workout_requires_reps_xor_duration(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    both = fn(date="2026-10-01", name="x",
+              steps=[{"type": "exercise", "reps": 10, "duration_seconds": 30}])
+    neither = fn(date="2026-10-01", name="x", steps=[{"type": "exercise", "sets": 2}])
+    assert both["error"] == "bad_argument"
+    assert neither["error"] == "bad_argument"
+    mock_garmin.upload_workout.assert_not_called()
+
+
+def test_schedule_strength_workout_rejects_bad_values(mcp_with_tools, mock_garmin) -> None:
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    bad_steps = [
+        [{"type": "exercise", "sets": 0, "reps": 10}],
+        [{"type": "exercise", "sets": True, "reps": 10}],
+        [{"type": "exercise", "reps": 10, "rest_seconds": -1}],
+        [{"type": "exercise", "reps": 10, "weight_kg": 0}],
+        [{"type": "exercise", "reps": 10, "exercise_name": "BARBELL_BACK_SQUAT"}],
+        [{"type": "exercise", "reps": 10, "category": "SQUAT", "exercise_name": "back squat"}],
+        [{"type": "rest", "duration_seconds": 0}],
+        [{"type": "stretch", "duration_seconds": 30}],
+        [],
+    ]
+    for steps in bad_steps:
+        result = fn(date="2026-10-01", name="x", steps=steps)
+        assert result["error"] == "bad_argument", steps
+    missing_name = fn(date="2026-10-01", name=" ", steps=[{"type": "exercise", "reps": 5}])
+    assert missing_name["error"] == "bad_argument"
+    mock_garmin.upload_workout.assert_not_called()
+
+
+def test_schedule_strength_workout_single_set_rest_follows(mcp_with_tools, mock_garmin) -> None:
+    mock_garmin.upload_workout.return_value = {"workoutId": 1}
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    fn(date="2026-10-01", name="x",
+       steps=[{"type": "exercise", "reps": 8, "rest_seconds": 90}])
+    steps = mock_garmin.upload_workout.call_args.args[0]["workoutSegments"][0]["workoutSteps"]
+    assert [s["stepType"]["stepTypeKey"] for s in steps] == ["interval", "rest"]
+    assert steps[1]["endConditionValue"] == 90.0
