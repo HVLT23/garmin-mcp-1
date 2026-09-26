@@ -402,6 +402,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
         name: str,
         steps: list[dict[str, Any]],
         description: str = "",
+        estimated_duration_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Upload a strength-training workout and schedule it on the user's calendar.
 
@@ -424,6 +425,9 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                 - `{"type": "rest" | "warmup" | "cooldown",
                   "duration_seconds": int, "description": str (optional)}`
             description: Optional description attached to the workout.
+            estimated_duration_seconds: Optional planned duration of the whole
+                session. Reps-based steps have no duration, so it is used as
+                the workout estimate when longer than the sum of timed steps.
 
         If Garmin rejects the upload while exercise keys are present (e.g. an
         exercise category it does not accept), the workout is uploaded once
@@ -446,7 +450,9 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
 
         try:
             upload_resp = client.upload_workout(
-                build_strength_workout(name, built_steps, description)
+                build_strength_workout(
+                    name, built_steps, description, estimated_duration_seconds
+                )
             )
         except GarminConnectConnectionError:
             if not has_exercise_keys(built_steps):
@@ -457,6 +463,7 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
                     name,
                     build_strength_steps(steps, with_exercise_keys=False),
                     description,
+                    estimated_duration_seconds,
                 )
             )
 

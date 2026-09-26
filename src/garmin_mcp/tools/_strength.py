@@ -311,11 +311,27 @@ def build_strength_workout(
     name: str,
     steps: list[dict[str, Any]],
     description: str | None,
+    estimated_duration_seconds: int | None = None,
 ) -> dict[str, Any]:
+    """`estimated_duration_seconds` (caller's planned duration) is used when
+    it is longer than the time-based estimate: reps-based steps have no
+    duration, so the step sum alone underestimates a strength session."""
+    estimate = estimate_duration_secs(steps)
+    if estimated_duration_seconds is not None:
+        if (
+            isinstance(estimated_duration_seconds, bool)
+            or not isinstance(estimated_duration_seconds, int)
+            or estimated_duration_seconds < 1
+        ):
+            raise ValueError(
+                "estimated_duration_seconds must be a positive integer, "
+                f"got {estimated_duration_seconds!r}"
+            )
+        estimate = max(estimate, estimated_duration_seconds)
     payload: dict[str, Any] = {
         "sportType": dict(STRENGTH_SPORT_TYPE),
         "workoutName": name,
-        "estimatedDurationInSecs": estimate_duration_secs(steps),
+        "estimatedDurationInSecs": estimate,
         "workoutSegments": [
             {
                 "segmentOrder": 1,
