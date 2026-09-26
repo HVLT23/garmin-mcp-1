@@ -129,16 +129,25 @@ Garmin state. Date arguments are ISO `YYYY-MM-DD`; date-defaulted tools fall bac
   (step types, end conditions, targets, repeat groups). Takes `workout_id`, not
   `scheduled_workout_id`. Read-only, trimmed by default.
 
-### Write tools (running workouts)
+### Write tools (running and strength workouts)
 
 These tools hit Garmin's unofficial workout endpoints. The endpoints have no SLA, no
 published contract, and the schema can drift without notice — treat success as best-effort.
-Scope is intentionally narrow: running only, no other sports, no wellness writes, no manual
-activity logging.
+Scope is intentionally narrow: running and strength-training workouts only, no other
+sports, no wellness writes, no manual activity logging.
 
 - `schedule_running_workout(date, name, steps, description="")` — upload a structured
   running workout and place it on the calendar on `date`. Returns
   `{workout_id, scheduled_workout_id, date, name}`.
+- `schedule_strength_workout(date, name, steps, description="")` — upload a
+  strength-training workout (sets, reps or duration, rest between sets, weight in kg,
+  optional Garmin `category` / `exercise_name`) and place it on the calendar on `date`.
+  If Garmin rejects the exercise keys, the upload is retried once without them (names
+  stay in the step notes). Returns
+  `{workout_id, scheduled_workout_id, date, name, exercise_keys_dropped}`.
+  Example step: `{"type": "exercise", "sets": 4, "reps": 5, "rest_seconds": 180,
+  "weight_kg": 100, "category": "SQUAT", "exercise_name": "BARBELL_BACK_SQUAT"}`;
+  also `{"type": "rest" | "warmup" | "cooldown", "duration_seconds": 600}`.
 - `unschedule_workout(scheduled_workout_id)` — remove the calendar entry. The template
   stays in the library.
 - `delete_workout(workout_id)` — delete the template (also removes any calendar entry).

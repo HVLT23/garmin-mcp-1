@@ -1,11 +1,12 @@
-"""Workout MCP tools — read the workout library and schedule structured running workouts."""
+"""Workout MCP tools — read the workout library and schedule structured
+running and strength-training workouts."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
-from garminconnect import Garmin
+from garminconnect import Garmin, GarminConnectConnectionError
 from garminconnect.workout import (
     ExecutableStep,
     RepeatGroup,
@@ -21,6 +22,11 @@ from mcp.server.fastmcp import FastMCP
 
 from garmin_mcp.cache import TTL_WORKOUT, TTL_WORKOUT_LIST, cached
 from garmin_mcp.tools._helpers import audited, coerce_date, safe_call
+from garmin_mcp.tools._strength import (
+    build_strength_steps,
+    build_strength_workout,
+    has_exercise_keys,
+)
 from garmin_mcp.tools._trimmers import trim_scheduled_workouts, trim_workout, trim_workouts
 
 ClientFactory = Callable[[], Garmin]
@@ -386,6 +392,89 @@ def register(mcp: FastMCP, client_factory: ClientFactory) -> None:
             "scheduled_workout_id": scheduled_workout_id,
             "date": date_iso,
             "name": name,
+        }
+
+    @mcp.tool()
+    @audited
+    @safe_call
+    def schedule_strength_workout(
+        date: str,
+        name: str,
+        steps: list[dict[str, Any]],
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Upload a strength-training workout and schedule it on the user's calendar.
+
+        The watch runs it as a Strength activity: each exercise shows its
+        reps (or duration), weight and notes, sets are grouped, and rest
+        periods count down between sets.
+
+        Args:
+            date: Target calendar date (`YYYY-MM-DD`). Required.
+            name: Workout name shown in Garmin Connect / on the watch.
+            steps: Ordered list of step dicts:
+                - exercise: `{"type": "exercise", "sets": int (default 1),
+                  "reps": int` OR `"duration_seconds": int` (exactly one),
+                  `"rest_seconds": int` (rest between sets, default 0),
+                  `"weight_kg": float` (optional),
+                  `"category": str` (optional Garmin exercise category, e.g.
+                  `SQUAT`), `"exercise_name": str` (optional Garmin exercise
+                  key, e.g. `BARBELL_BACK_SQUAT`, requires `category`),
+                  `"description": str` (optional note shown on the step)}`
+                - `{"type": "rest" | "warmup" | "cooldown",
+                  "duration_seconds": int, "description": str (optional)}`
+            description: Optional description attached to the workout.
+
+        If Garmin rejects the upload while exercise keys are present (e.g. an
+        exercise category it does not accept), the workout is uploaded once
+        more without `category` / `exercise_name`: exercise names then only
+        appear in the step notes. `exercise_keys_dropped` reports it.
+
+        Returns:
+            `{"workout_id": int, "scheduled_workout_id": int, "date": str,
+            "name": str, "exercise_keys_dropped": bool}`.
+        """
+        if date is None:
+            raise ValueError("date is required")
+        date_iso = coerce_date(date)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name is required")
+
+        built_steps = build_strength_steps(steps, with_exercise_keys=True)
+        client = client_factory()
+        exercise_keys_dropped = False
+
+        try:
+            upload_resp = client.upload_workout(
+                build_strength_workout(name, built_steps, description)
+            )
+        except GarminConnectConnectionError:
+            if not has_exercise_keys(built_steps):
+                raise
+            exercise_keys_dropped = True
+            upload_resp = client.upload_workout(
+                build_strength_workout(
+                    name,
+                    build_strength_steps(steps, with_exercise_keys=False),
+                    description,
+                )
+            )
+
+        workout_id = (
+            upload_resp.get("workoutId") if isinstance(upload_resp, dict) else None
+        )
+        if workout_id is None:
+            raise ValueError(f"Garmin did not return a workoutId; response: {upload_resp!r}")
+
+        schedule_resp = client.schedule_workout(workout_id, date_iso)
+        scheduled_workout_id = _extract_scheduled_workout_id(schedule_resp)
+
+        return {
+            "workout_id": workout_id,
+            "scheduled_workout_id": scheduled_workout_id,
+            "date": date_iso,
+            "name": name,
+            "exercise_keys_dropped": exercise_keys_dropped,
         }
 
     @mcp.tool()
