@@ -893,3 +893,25 @@ def test_schedule_strength_workout_single_set_rest_follows(mcp_with_tools, mock_
     steps = mock_garmin.upload_workout.call_args.args[0]["workoutSegments"][0]["workoutSteps"]
     assert [s["stepType"]["stepTypeKey"] for s in steps] == ["interval", "rest"]
     assert steps[1]["endConditionValue"] == 90.0
+
+
+def test_schedule_strength_workout_uses_longer_planned_duration(
+    mcp_with_tools, mock_garmin
+) -> None:
+    mock_garmin.upload_workout.return_value = {"workoutId": 1}
+    fn = get_tool(mcp_with_tools, "schedule_strength_workout")
+    steps = [
+        {"type": "warmup", "duration_seconds": 600},
+        {"type": "exercise", "sets": 4, "reps": 5, "rest_seconds": 180},
+    ]
+    fn(date="2026-10-01", name="x", steps=steps, estimated_duration_seconds=3780)
+    payload = mock_garmin.upload_workout.call_args.args[0]
+    assert payload["estimatedDurationInSecs"] == 3780
+
+    # A shorter planned duration never lowers the time-based estimate.
+    fn(date="2026-10-01", name="x", steps=steps, estimated_duration_seconds=60)
+    payload = mock_garmin.upload_workout.call_args.args[0]
+    assert payload["estimatedDurationInSecs"] == 600 + 3 * 180
+
+    bad = fn(date="2026-10-01", name="x", steps=steps, estimated_duration_seconds=0)
+    assert bad["error"] == "bad_argument"
